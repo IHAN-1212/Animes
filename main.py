@@ -38,6 +38,14 @@ class AnimeInfoDownloaderGUI:
         
         # 存储搜索结果
         self.search_results = []
+
+        # 初始化文件夹
+        if not os.path.exists(self.download_path):
+            os.makedirs(self.download_path)
+        if not os.path.exists(self.watching_path):
+            os.makedirs(self.watching_path)
+        if not os.path.exists(self.finished_path):
+            os.makedirs(self.finished_path)
         
     def create_widgets(self):
         # 创建菜单栏
@@ -176,11 +184,15 @@ class AnimeInfoDownloaderGUI:
         """创建分类列表项"""
         # 读取信息文件
         info_path = os.path.join(category_path, info_file)
-        with open(info_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        try:
+            with open(info_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except:
+            # 如果读取失败，跳过这个文件
+            return
         
         # 提取标题
-        title_match = re.search(r"=== (.*?) ===", content)
+        title_match = re.search(r"=== (.*?) 详细信息 ===", content)
         if not title_match:
             return
         
@@ -207,8 +219,9 @@ class AnimeInfoDownloaderGUI:
         if rating_match:
             rating = rating_match.group(1)
         
-        # 查找封面图片
-        cover_file = info_file.replace("_info.txt", "_cover.jpg")
+        # 查找封面图片 - 使用安全文件名
+        safe_title = self.downloader._get_safe_filename(title)
+        cover_file = f"{safe_title}_cover.jpg"
         cover_path = os.path.join(category_path, cover_file)
         
         # 创建项目框架
@@ -253,7 +266,7 @@ class AnimeInfoDownloaderGUI:
         
         # 查看详情按钮
         detail_button = ttk.Button(right_frame, text="查看详情", 
-                                  command=lambda t=title, p=category_path: self._show_category_detail(t, p))
+                                  command=lambda t=title, st=safe_title, p=category_path: self._show_category_detail(t, st, p))
         detail_button.pack(anchor=tk.E, pady=5)
     
     def _load_category_cover_image(self, parent_frame, cover_path):
@@ -288,16 +301,20 @@ class AnimeInfoDownloaderGUI:
         image_label.image = photo  # 保持引用
         image_label.pack()
     
-    def _show_category_detail(self, title, category_path):
+    def _show_category_detail(self, title, safe_title, category_path):
         """显示分类中动漫的详细信息"""
-        # 读取信息文件
-        info_path = os.path.join(category_path, f"{title}_info.txt")
+        # 使用安全标题构建文件路径
+        info_path = os.path.join(category_path, f"{safe_title}_info.txt")
         if not os.path.exists(info_path):
             messagebox.showerror("错误", f"找不到{title}的详细信息")
             return
         
-        with open(info_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        try:
+            with open(info_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except:
+            messagebox.showerror("错误", f"无法读取{title}的详细信息")
+            return
         
         # 提取信息
         name_cn = ""
@@ -358,10 +375,10 @@ class AnimeInfoDownloaderGUI:
         
         # 显示详细信息
         self._populate_category_detail_frame(scrollable_frame, title, name_cn, air_date, 
-                                           episodes, anime_type, rating, summary, category_path)
+                                           episodes, anime_type, rating, summary, category_path, safe_title)
     
     def _populate_category_detail_frame(self, parent, title, name_cn, air_date, episodes, 
-                                      anime_type, rating, summary, category_path):
+                                      anime_type, rating, summary, category_path, safe_title):
         """填充分类详情框架"""
         # 顶部框架 - 标题和封面
         top_frame = ttk.Frame(parent)
@@ -371,8 +388,8 @@ class AnimeInfoDownloaderGUI:
         left_frame = ttk.Frame(top_frame)
         left_frame.pack(side=tk.LEFT, padx=(0, 20))
         
-        # 加载大封面图片
-        cover_path = os.path.join(category_path, f"{title}_cover.jpg")
+        # 加载大封面图片 - 使用安全标题
+        cover_path = os.path.join(category_path, f"{safe_title}_cover.jpg")
         self._load_category_large_cover_image(left_frame, cover_path)
         
         # 右侧 - 标题和基本信息
@@ -804,6 +821,10 @@ class AnimeInfoDownloader:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
     
+    def _get_safe_filename(self, filename):
+        """获取安全的文件名"""
+        return re.sub(r'[<>:"/\\|?*]', '', filename)
+    
     def search_bangumi(self, anime_name, max_results=5):
         """使用Bangumi（番组计划）API搜索动漫详细信息"""
         url = "https://api.bgm.tv/search/subject/" + quote(anime_name)
@@ -917,7 +938,7 @@ class AnimeInfoDownloader:
         source = anime_info['source']
         
         # 清理文件名
-        safe_title = re.sub(r'[<>:"/\\|?*]', '', title)
+        safe_title = self._get_safe_filename(title)
         filename = f"{safe_title}_cover.jpg"
         filepath = os.path.join(download_path, filename)
         
@@ -942,7 +963,7 @@ class AnimeInfoDownloader:
             return False
         
         title = anime_info['title']
-        safe_title = re.sub(r'[<>:"/\\|?*]', '', title)
+        safe_title = self._get_safe_filename(title)
         filename = f"{safe_title}_info.txt"
         filepath = os.path.join(download_path, filename)
         
