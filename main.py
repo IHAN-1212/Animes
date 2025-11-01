@@ -145,7 +145,7 @@ class AnimeInfoDownloaderGUI:
         left_frame.pack(side=tk.LEFT, padx=5, pady=5)
         
         # 加载封面图片
-        self._load_cover_image(anime_info, left_frame)
+        self._load_cover_image(left_frame, anime_info)
         
         # 右半部分 - 信息
         right_frame = ttk.Frame(result_frame)
@@ -194,15 +194,15 @@ class AnimeInfoDownloaderGUI:
             summary_label.pack(anchor=tk.W, fill=tk.X)
             summary_label.bind("<Button-1>", lambda e, idx=index: self._select_anime(idx))
     
-    def _load_cover_image(self, anime_info, parent_frame):
+    def _load_cover_image(self, parent_frame, anime_info):
         # 默认显示占位图
         placeholder = tk.Label(parent_frame, text="加载中...", width=15, height=20, bg="lightgray")
         placeholder.pack()
         
         # 在新线程中加载图片
-        threading.Thread(target=self._fetch_cover_image, args=(anime_info, parent_frame, placeholder), daemon=True).start()
+        threading.Thread(target=self._fetch_cover_image, args=(parent_frame, placeholder, anime_info), daemon=True).start()
     
-    def _fetch_cover_image(self, anime_info, parent_frame, placeholder):
+    def _fetch_cover_image(self, parent_frame, placeholder, anime_info):
         try:
             if 'cover_url' in anime_info and anime_info['cover_url']:
                 response = requests.get(anime_info['cover_url'], timeout=10)
@@ -290,7 +290,7 @@ class AnimeInfoDownloaderGUI:
         left_frame.pack(side=tk.LEFT, padx=(0, 20))
         
         # 加载大封面图片
-        self._load_large_cover_image(anime_info, left_frame)
+        self._load_large_cover_image(left_frame, anime_info)
         
         # 右侧 - 标题和基本信息
         right_frame = ttk.Frame(top_frame)
@@ -346,13 +346,13 @@ class AnimeInfoDownloaderGUI:
         save_info_frame = ttk.Frame(parent)
         save_info_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        save_label = ttk.Label(save_info_frame, text=f"信息已保存至: {self.download_path}")
-        save_label.pack(side=tk.LEFT)
+        # save_label = ttk.Label(save_info_frame, text=f"信息已保存至: {self.download_path}")
+        # save_label.pack(side=tk.LEFT)
         
         # 打开文件夹按钮
-        open_button = ttk.Button(save_info_frame, text="打开文件夹", 
-                                command=lambda: os.startfile(self.download_path))
-        open_button.pack(side=tk.RIGHT)
+        # open_button = ttk.Button(save_info_frame, text="打开文件夹", 
+        #                         command=lambda: os.startfile(self.download_path))
+        # open_button.pack(side=tk.RIGHT)
     
     def _load_large_cover_image(self, parent_frame, anime_info):
         # 默认显示占位图
@@ -360,9 +360,9 @@ class AnimeInfoDownloaderGUI:
         placeholder.pack()
         
         # 在新线程中加载大图
-        threading.Thread(target=self._fetch_large_cover_image, args=(anime_info, parent_frame, placeholder), daemon=True).start()
+        threading.Thread(target=self._fetch_large_cover_image, args=(parent_frame, placeholder, anime_info), daemon=True).start()
     
-    def _fetch_large_cover_image(self, anime_info, parent_frame, placeholder):
+    def _fetch_large_cover_image(self, parent_frame, placeholder, anime_info):
         try:
             if 'cover_url' in anime_info and anime_info['cover_url']:
                 response = requests.get(anime_info['cover_url'], timeout=10)
