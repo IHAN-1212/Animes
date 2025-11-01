@@ -66,12 +66,9 @@ class AnimeInfoDownloader:
         if data.get('air_date'):
             details['air_date'] = data['air_date']
         
-        # 集数 - 格式化为"全xx话"
-        episodes = data.get('eps') or data.get('eps_count')
-        if episodes:
-            details['episodes'] = f"全{episodes}话"
-        else:
-            details['episodes'] = "集数未知"
+        # 集数 - 正确处理集数信息
+        episodes = self._parse_episodes(data)
+        details['episodes'] = episodes
         
         # 类型
         if data.get('platform'):
@@ -90,6 +87,32 @@ class AnimeInfoDownloader:
             details['summary'] = summary.strip()
         
         return details
+    
+    def _parse_episodes(self, data):
+        """解析集数信息，正确处理Bangumi返回的复杂数据结构"""
+        # 尝试从不同字段获取集数
+        if data.get('eps_count'):
+            # 如果有明确的集数计数
+            return f"全{data['eps_count']}话"
+        elif data.get('total_episodes'):
+            # 备用字段
+            return f"全{data['total_episodes']}话"
+        elif data.get('eps'):
+            # 如果eps是数字
+            if isinstance(data['eps'], int):
+                return f"全{data['eps']}话"
+            # 如果eps是列表，计算正片数量
+            elif isinstance(data['eps'], list):
+                # 计算正片数量（type=0的集数）
+                main_episodes = [ep for ep in data['eps'] if ep.get('type') == 0]
+                if main_episodes:
+                    return f"全{len(main_episodes)}话"
+                # 如果没有明确的正片，使用总集数
+                else:
+                    return f"全{len(data['eps'])}话"
+        
+        # 如果以上都没有，返回默认值
+        return "集数未知"
     
     def download_cover(self, anime_info, download_path="."):
         """下载封面图片"""
