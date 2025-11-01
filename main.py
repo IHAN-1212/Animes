@@ -9,26 +9,205 @@ from urllib.parse import quote, unquote
 from datetime import datetime
 from PIL import Image, ImageTk
 import io
+import pymysql
+from pymysql.cursors import DictCursor
+
+class DatabaseManager:
+    def __init__(self):
+        self.connection = None
+        self.connect()
+    
+    def connect(self):
+        """连接数据库"""
+        try:
+            self.connection = pymysql.connect(
+                host='192.168.31.28',
+                user='root',
+                password='root',
+                database='animes_db',
+                charset='utf8mb4',
+                cursorclass=DictCursor
+            )
+            print("数据库连接成功")
+        except Exception as e:
+            print(f"数据库连接失败: {e}")
+            messagebox.showerror("数据库错误", f"无法连接数据库: {e}")
+    
+    def get_connection(self):
+        """获取数据库连接，如果断开则重连"""
+        if self.connection is None or not self.connection.open:
+            self.connect()
+        return self.connection
+    
+    def check_user_exists(self, uid=1):
+        """检查用户是否存在，如果不存在则创建默认用户"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT uid FROM userinfo WHERE uid = %s", (uid,))
+                result = cursor.fetchone()
+                
+                if not result:
+                    # 创建默认用户
+                    cursor.execute("""
+                        INSERT INTO userinfo (tel, mail, uname, pwd, register_time) 
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, ('13800138000', 'default@example.com', '默认用户', '123456', datetime.now()))
+                    conn.commit()
+                    print("创建默认用户成功")
+                    
+        except Exception as e:
+            print(f"检查用户失败: {e}")
+    
+    def anime_exists(self, title, source):
+        """检查动漫是否已存在"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT aid FROM animesinfo WHERE (acn_name = %s OR ajp_name = %s) AND source = %s", 
+                              (title, title, source))
+                result = cursor.fetchone()
+                return result['aid'] if result else None
+        except Exception as e:
+            print(f"检查动漫存在失败: {e}")
+            return None
+    
+    def insert_anime(self, anime_info):
+        """插入动漫信息到数据库"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                # 检查是否已存在
+                existing_aid = self.anime_exists(anime_info['title'], anime_info['source'])
+                
+                if existing_aid:
+                    print(f"动漫已存在，ID: {existing_aid}")
+                    return existing_aid
+                
+                # 解析开播时间
+                broadcast_time = None
+                if 'air_date' in anime_info and anime_info['air_date']:
+                    try:
+                        broadcast_time = datetime.strptime(anime_info['air_date'], '%Y-%m-%d')
+                    except:
+                        pass
+                
+                # 解析集数
+                episodes = None
+                if 'episodes' in anime_info and anime_info['episodes']:
+                    try:
+                        # 从字符串中提取数字
+                        episodes_str = anime_info['episodes']
+                        episodes_match = re.search(r'(\d+)', episodes_str)
+                        if episodes_match:
+                            episodes = int(episodes_match.group(1))
+                    except:
+                        pass
+                
+                # 解析评分
+                score = None
+                if 'rating' in anime_info and anime_info['rating']:
+                    try:
+                        score = float(anime_info['rating'])
+                    except:
+                        pass
+                
+                # 插入动漫信息
+                sql = """
+                    INSERT INTO animesinfo 
+                    (acn_name, ajp_name, abroadcast_time, episodes, score, source, introduce, cover_url) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(sql, (
+                    anime_info.get('name_cn', anime_info['title']),
+                    anime_info['title'],
+                    broadcast_time,
+                    episodes,
+                    score,
+                    anime_info['source'],
+                    anime_info.get('summary', ''),
+                    anime_info.get('cover_url', '')
+                ))
+                
+                aid = cursor.lastrowid
+                conn.commit()
+                print(f"动漫信息插入成功，ID: {aid}")
+                return aid
+                
+        except Exception as e:
+            print(f"插入动漫信息失败: {e}")
+            return None
+    
+    def add_to_category(self, aid, uid, state):
+        """添加动漫到用户分类"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                # 检查是否已存在相同记录
+                cursor.execute("""
+                    SELECT rid FROM recordinfo 
+                    WHERE uid = %s AND aid = %s AND state = %s
+                """, (uid, aid, state))
+                existing = cursor.fetchone()
+                
+                if existing:
+                    print(f"记录已存在，RID: {existing['rid']}")
+                    return existing['rid']
+                
+                # 插入新记录
+                cursor.execute("""
+                    INSERT INTO recordinfo (uid, aid, state) 
+                    VALUES (%s, %s, %s)
+                """, (uid, aid, state))
+                
+                rid = cursor.lastrowid
+                conn.commit()
+                print(f"分类记录插入成功，RID: {rid}")
+                return rid
+                
+        except Exception as e:
+            print(f"添加分类失败: {e}")
+            return None
+    
+    def get_animes_by_state(self, uid, state):
+        """根据状态获取用户的动漫列表"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                sql = """
+                    SELECT a.*, r.rid, r.state 
+                    FROM animesinfo a 
+                    INNER JOIN recordinfo r ON a.aid = r.aid 
+                    WHERE r.uid = %s AND r.state = %s 
+                    ORDER BY a.acn_name
+                """
+                cursor.execute(sql, (uid, state))
+                return cursor.fetchall()
+        except Exception as e:
+            print(f"获取分类动漫失败: {e}")
+            return []
+    
+    def get_anime_by_id(self, aid):
+        """根据ID获取动漫信息"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM animesinfo WHERE aid = %s", (aid,))
+                return cursor.fetchone()
+        except Exception as e:
+            print(f"获取动漫信息失败: {e}")
+            return None
 
 class AnimeInfoDownloaderGUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("动漫信息下载器")
+        self.root.title("动漫信息下载器 - 数据库版")
         self.root.geometry("900x700")
         self.root.configure(bg="#f0f0f0")
         
-        # 创建下载目录
-        self.download_path = "./anime_downloads"
-        if not os.path.exists(self.download_path):
-            os.makedirs(self.download_path)
-        
-        # 创建分类目录
-        self.watching_path = os.path.join(self.download_path, "watching")
-        self.finished_path = os.path.join(self.download_path, "finished")
-        if not os.path.exists(self.watching_path):
-            os.makedirs(self.watching_path)
-        if not os.path.exists(self.finished_path):
-            os.makedirs(self.finished_path)
+        # 初始化数据库管理器
+        self.db = DatabaseManager()
+        self.db.check_user_exists(1)  # 使用默认用户ID=1
         
         # 初始化下载器
         self.downloader = AnimeInfoDownloader()
@@ -38,14 +217,6 @@ class AnimeInfoDownloaderGUI:
         
         # 存储搜索结果
         self.search_results = []
-
-        # 初始化文件夹
-        if not os.path.exists(self.download_path):
-            os.makedirs(self.download_path)
-        if not os.path.exists(self.watching_path):
-            os.makedirs(self.watching_path)
-        if not os.path.exists(self.finished_path):
-            os.makedirs(self.finished_path)
         
     def create_widgets(self):
         # 创建菜单栏
@@ -122,18 +293,17 @@ class AnimeInfoDownloaderGUI:
     
     def show_home(self):
         """显示主页（搜索界面）"""
-        # 这里已经是主页，不需要额外操作
         pass
     
     def show_watching_list(self):
         """显示追番列表"""
-        self._show_category_list("追番中", self.watching_path)
+        self._show_category_list("追番中", "watching")
     
     def show_finished_list(self):
         """显示已完成列表"""
-        self._show_category_list("看完了", self.finished_path)
+        self._show_category_list("看完了", "finished")
     
-    def _show_category_list(self, category_name, category_path):
+    def _show_category_list(self, category_name, state):
         """显示分类列表"""
         # 创建新窗口
         list_window = tk.Toplevel(self.root)
@@ -165,65 +335,23 @@ class AnimeInfoDownloaderGUI:
         scrollable_frame.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
         
         # 显示分类列表
-        self._populate_category_list(scrollable_frame, category_path)
+        self._populate_category_list(scrollable_frame, state)
     
-    def _populate_category_list(self, parent, category_path):
+    def _populate_category_list(self, parent, state):
         """填充分类列表"""
-        # 获取分类目录中的所有信息文件
-        info_files = [f for f in os.listdir(category_path) if f.endswith("_info.txt")]
+        # 从数据库获取分类列表
+        animes = self.db.get_animes_by_state(1, state)  # 使用默认用户ID=1
         
-        if not info_files:
+        if not animes:
             ttk.Label(parent, text="该分类中还没有动漫", foreground="gray").pack(pady=20)
             return
         
         # 显示每个动漫
-        for info_file in info_files:
-            self._create_category_item(parent, category_path, info_file)
+        for anime in animes:
+            self._create_category_item(parent, anime)
     
-    def _create_category_item(self, parent, category_path, info_file):
+    def _create_category_item(self, parent, anime):
         """创建分类列表项"""
-        # 读取信息文件
-        info_path = os.path.join(category_path, info_file)
-        try:
-            with open(info_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except:
-            # 如果读取失败，跳过这个文件
-            return
-        
-        # 提取标题
-        title_match = re.search(r"=== (.*?) 详细信息 ===", content)
-        if not title_match:
-            return
-        
-        title = title_match.group(1)
-        
-        # 提取其他信息
-        name_cn = ""
-        cn_match = re.search(r"中文名: (.*)", content)
-        if cn_match:
-            name_cn = cn_match.group(1)
-        
-        air_date = ""
-        date_match = re.search(r"开播时间: (.*)", content)
-        if date_match:
-            air_date = date_match.group(1)
-        
-        episodes = ""
-        episodes_match = re.search(r"集数: (.*)", content)
-        if episodes_match:
-            episodes = episodes_match.group(1)
-        
-        rating = ""
-        rating_match = re.search(r"评分: (.*)", content)
-        if rating_match:
-            rating = rating_match.group(1)
-        
-        # 查找封面图片 - 使用安全文件名
-        safe_title = self.downloader._get_safe_filename(title)
-        cover_file = f"{safe_title}_cover.jpg"
-        cover_path = os.path.join(category_path, cover_file)
-        
         # 创建项目框架
         item_frame = ttk.Frame(parent, relief="solid", borderwidth=1)
         item_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -233,58 +361,65 @@ class AnimeInfoDownloaderGUI:
         left_frame.pack(side=tk.LEFT, padx=5, pady=5)
         
         # 加载封面图片
-        self._load_category_cover_image(left_frame, cover_path)
+        self._load_category_cover_image(left_frame, anime.get('cover_url', ''))
         
         # 右半部分 - 信息
         right_frame = ttk.Frame(item_frame)
         right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # 标题 - 中文和英文
-        title_text = title
-        if name_cn and name_cn != title:
-            title_text = f"{name_cn}\n({title})"
+        title_text = anime['ajp_name']
+        if anime['acn_name'] and anime['acn_name'] != anime['ajp_name']:
+            title_text = f"{anime['acn_name']}\n({anime['ajp_name']})"
         
         title_label = ttk.Label(right_frame, text=title_text, font=("Arial", 12, "bold"))
         title_label.pack(anchor=tk.W)
         
-        # 基本信息
+        # 基本信息框架
         info_frame = ttk.Frame(right_frame)
         info_frame.pack(fill=tk.X, pady=5)
         
         # 年份
-        year = air_date.split('-')[0] if air_date else '未知年份'
+        year = str(anime['abroadcast_time'].year) if anime['abroadcast_time'] else '未知年份'
         year_label = ttk.Label(info_frame, text=f"📅 {year}")
         year_label.pack(side=tk.LEFT, padx=(0, 10))
         
         # 集数
+        episodes = anime['episodes'] if anime['episodes'] else '集数未知'
         episodes_label = ttk.Label(info_frame, text=f"🎞️ {episodes}")
         episodes_label.pack(side=tk.LEFT, padx=(0, 10))
         
         # 评分
+        rating = anime['score'] if anime['score'] else '无评分'
         rating_label = ttk.Label(info_frame, text=f"⭐ {rating}")
         rating_label.pack(side=tk.LEFT)
         
         # 查看详情按钮
         detail_button = ttk.Button(right_frame, text="查看详情", 
-                                  command=lambda t=title, st=safe_title, p=category_path: self._show_category_detail(t, st, p))
+                                  command=lambda aid=anime['aid']: self._show_category_detail(aid))
         detail_button.pack(anchor=tk.E, pady=5)
     
-    def _load_category_cover_image(self, parent_frame, cover_path):
+    def _load_category_cover_image(self, parent_frame, cover_url):
         """加载分类列表中的封面图片"""
         # 默认显示占位图
         placeholder = tk.Label(parent_frame, text="无封面", width=15, height=20, bg="lightgray")
         placeholder.pack()
         
-        # 如果封面文件存在，加载图片
-        if os.path.exists(cover_path):
+        # 如果封面URL存在，加载图片
+        if cover_url:
             # 在新线程中加载图片
-            threading.Thread(target=self._fetch_category_cover_image, args=(parent_frame, placeholder, cover_path), daemon=True).start()
+            threading.Thread(target=self._fetch_category_cover_image, 
+                           args=(parent_frame, placeholder, cover_url), daemon=True).start()
     
-    def _fetch_category_cover_image(self, parent_frame, placeholder, cover_path):
+    def _fetch_category_cover_image(self, parent_frame, placeholder, cover_url):
         """获取分类列表中的封面图片"""
         try:
-            # 从本地文件加载图片
-            image = Image.open(cover_path)
+            # 从网络URL加载图片
+            response = requests.get(cover_url, timeout=10)
+            response.raise_for_status()
+            
+            image_data = response.content
+            image = Image.open(io.BytesIO(image_data))
             image.thumbnail((100, 140))  # 调整大小
             photo = ImageTk.PhotoImage(image)
             
@@ -301,56 +436,17 @@ class AnimeInfoDownloaderGUI:
         image_label.image = photo  # 保持引用
         image_label.pack()
     
-    def _show_category_detail(self, title, safe_title, category_path):
+    def _show_category_detail(self, aid):
         """显示分类中动漫的详细信息"""
-        # 使用安全标题构建文件路径
-        info_path = os.path.join(category_path, f"{safe_title}_info.txt")
-        if not os.path.exists(info_path):
-            messagebox.showerror("错误", f"找不到{title}的详细信息")
+        # 从数据库获取动漫详情
+        anime = self.db.get_anime_by_id(aid)
+        if not anime:
+            messagebox.showerror("错误", "找不到动漫的详细信息")
             return
-        
-        try:
-            with open(info_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except:
-            messagebox.showerror("错误", f"无法读取{title}的详细信息")
-            return
-        
-        # 提取信息
-        name_cn = ""
-        cn_match = re.search(r"中文名: (.*)", content)
-        if cn_match:
-            name_cn = cn_match.group(1)
-        
-        air_date = ""
-        date_match = re.search(r"开播时间: (.*)", content)
-        if date_match:
-            air_date = date_match.group(1)
-        
-        episodes = ""
-        episodes_match = re.search(r"集数: (.*)", content)
-        if episodes_match:
-            episodes = episodes_match.group(1)
-        
-        anime_type = ""
-        type_match = re.search(r"类型: (.*)", content)
-        if type_match:
-            anime_type = type_match.group(1)
-        
-        rating = ""
-        rating_match = re.search(r"评分: (.*)", content)
-        if rating_match:
-            rating = rating_match.group(1)
-        
-        # 提取简介
-        summary = ""
-        summary_match = re.search(r"【简介】\n(.*?)(?:\n【|$)", content, re.DOTALL)
-        if summary_match:
-            summary = summary_match.group(1).strip()
         
         # 创建详细信息窗口
         detail_window = tk.Toplevel(self.root)
-        detail_window.title(f"{title} - 详细信息")
+        detail_window.title(f"{anime['ajp_name']} - 详细信息")
         detail_window.geometry("700x800")
         
         # 创建滚动区域
@@ -374,11 +470,9 @@ class AnimeInfoDownloaderGUI:
         scrollable_frame.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
         
         # 显示详细信息
-        self._populate_category_detail_frame(scrollable_frame, title, name_cn, air_date, 
-                                           episodes, anime_type, rating, summary, category_path, safe_title)
+        self._populate_category_detail_frame(scrollable_frame, anime)
     
-    def _populate_category_detail_frame(self, parent, title, name_cn, air_date, episodes, 
-                                      anime_type, rating, summary, category_path, safe_title):
+    def _populate_category_detail_frame(self, parent, anime):
         """填充分类详情框架"""
         # 顶部框架 - 标题和封面
         top_frame = ttk.Frame(parent)
@@ -388,18 +482,17 @@ class AnimeInfoDownloaderGUI:
         left_frame = ttk.Frame(top_frame)
         left_frame.pack(side=tk.LEFT, padx=(0, 20))
         
-        # 加载大封面图片 - 使用安全标题
-        cover_path = os.path.join(category_path, f"{safe_title}_cover.jpg")
-        self._load_category_large_cover_image(left_frame, cover_path)
+        # 加载大封面图片
+        self._load_category_large_cover_image(left_frame, anime.get('cover_url', ''))
         
         # 右侧 - 标题和基本信息
         right_frame = ttk.Frame(top_frame)
         right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # 标题 - 中文和英文
-        title_text = title
-        if name_cn and name_cn != title:
-            title_text = f"{name_cn}\n({title})"
+        title_text = anime['ajp_name']
+        if anime['acn_name'] and anime['acn_name'] != anime['ajp_name']:
+            title_text = f"{anime['acn_name']}\n({anime['ajp_name']})"
         
         title_label = ttk.Label(right_frame, text=title_text, font=("Arial", 16, "bold"))
         title_label.pack(anchor=tk.W, pady=(0, 10))
@@ -409,52 +502,56 @@ class AnimeInfoDownloaderGUI:
         info_frame.pack(fill=tk.X, pady=5)
         
         # 开播时间
-        if air_date:
-            date_label = ttk.Label(info_frame, text=f"开播时间: {air_date}")
+        if anime['abroadcast_time']:
+            date_label = ttk.Label(info_frame, text=f"开播时间: {anime['abroadcast_time'].strftime('%Y-%m-%d')}")
             date_label.pack(anchor=tk.W)
         
         # 集数
-        if episodes:
-            episodes_label = ttk.Label(info_frame, text=f"集数: {episodes}")
+        if anime['episodes']:
+            episodes_label = ttk.Label(info_frame, text=f"集数: {anime['episodes']}")
             episodes_label.pack(anchor=tk.W)
         
-        # 类型
-        if anime_type:
-            type_label = ttk.Label(info_frame, text=f"类型: {anime_type}")
-            type_label.pack(anchor=tk.W)
+        # 来源
+        if anime['source']:
+            source_label = ttk.Label(info_frame, text=f"数据来源: {anime['source']}")
+            source_label.pack(anchor=tk.W)
         
         # 评分
-        if rating:
-            rating_label = ttk.Label(info_frame, text=f"评分: {rating}")
+        if anime['score']:
+            rating_label = ttk.Label(info_frame, text=f"评分: {anime['score']}")
             rating_label.pack(anchor=tk.W)
         
         # 简介
-        if summary:
+        if anime['introduce']:
             summary_frame = ttk.LabelFrame(parent, text="简介", padding="10")
             summary_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
             
             summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD, height=15)
-            summary_text.insert(tk.END, summary)
+            summary_text.insert(tk.END, anime['introduce'])
             summary_text.config(state=tk.DISABLED)
             summary_text.pack(fill=tk.BOTH, expand=True)
     
-    def _load_category_large_cover_image(self, parent_frame, cover_path):
+    def _load_category_large_cover_image(self, parent_frame, cover_url):
         """加载分类详情中的大封面图片"""
         # 默认显示占位图
         placeholder = tk.Label(parent_frame, text="无封面", width=20, height=28, bg="lightgray")
         placeholder.pack()
         
-        # 如果封面文件存在，加载图片
-        if os.path.exists(cover_path):
+        # 如果封面URL存在，加载图片
+        if cover_url:
             # 在新线程中加载图片
             threading.Thread(target=self._fetch_category_large_cover_image, 
-                           args=(parent_frame, placeholder, cover_path), daemon=True).start()
+                           args=(parent_frame, placeholder, cover_url), daemon=True).start()
     
-    def _fetch_category_large_cover_image(self, parent_frame, placeholder, cover_path):
+    def _fetch_category_large_cover_image(self, parent_frame, placeholder, cover_url):
         """获取分类详情中的大封面图片"""
         try:
-            # 从本地文件加载图片
-            image = Image.open(cover_path)
+            # 从网络URL加载图片
+            response = requests.get(cover_url, timeout=10)
+            response.raise_for_status()
+            
+            image_data = response.content
+            image = Image.open(io.BytesIO(image_data))
             image.thumbnail((200, 280))  # 调整大小为更大的尺寸
             photo = ImageTk.PhotoImage(image)
             
@@ -628,7 +725,7 @@ class AnimeInfoDownloaderGUI:
         image_label.pack()
     
     def _show_anime_details(self, index):
-        """显示动漫详情（不自动下载）"""
+        """显示动漫详情"""
         if 0 <= index < len(self.search_results):
             selected_anime = self.search_results[index]
             
@@ -692,23 +789,26 @@ class AnimeInfoDownloaderGUI:
     
     def _add_to_watching_by_info(self, anime_info):
         """通过动漫信息添加到追番列表"""
-        self._add_to_category(anime_info, self.watching_path, "追番中")
+        self._add_to_category(anime_info, "watching", "追番中")
     
     def _add_to_finished_by_info(self, anime_info):
         """通过动漫信息添加到看完了列表"""
-        self._add_to_category(anime_info, self.finished_path, "看完了")
+        self._add_to_category(anime_info, "finished", "看完了")
     
-    def _add_to_category(self, anime_info, category_path, category_name):
+    def _add_to_category(self, anime_info, state, category_name):
         """添加到指定分类"""
         try:
             self.status_var.set(f"正在添加到{category_name}: {anime_info['title']}")
             
-            # 下载封面
-            if 'cover_url' in anime_info and anime_info['cover_url']:
-                self.downloader.download_cover(anime_info, category_path)
+            # 插入动漫信息到数据库
+            aid = self.db.insert_anime(anime_info)
+            if not aid:
+                raise Exception("无法保存动漫信息到数据库")
             
-            # 保存信息到文件
-            self.downloader.save_info_to_file(anime_info, category_path)
+            # 添加到用户分类
+            rid = self.db.add_to_category(aid, 1, state)  # 使用默认用户ID=1
+            if not rid:
+                raise Exception("无法添加到分类")
             
             self.status_var.set(f"已添加到{category_name}: {anime_info['title']}")
             messagebox.showinfo("成功", f"已成功添加到{category_name}列表")
@@ -821,10 +921,6 @@ class AnimeInfoDownloader:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
     
-    def _get_safe_filename(self, filename):
-        """获取安全的文件名"""
-        return re.sub(r'[<>:"/\\|?*]', '', filename)
-    
     def search_bangumi(self, anime_name, max_results=5):
         """使用Bangumi（番组计划）API搜索动漫详细信息"""
         url = "https://api.bgm.tv/search/subject/" + quote(anime_name)
@@ -926,87 +1022,6 @@ class AnimeInfoDownloader:
         
         # 如果以上都没有，返回默认值
         return "集数未知"
-    
-    def download_cover(self, anime_info, download_path="."):
-        """下载封面图片"""
-        if not anime_info or 'cover_url' not in anime_info:
-            print("未找到封面URL")
-            return False
-        
-        title = anime_info['title']
-        cover_url = anime_info['cover_url']
-        source = anime_info['source']
-        
-        # 清理文件名
-        safe_title = self._get_safe_filename(title)
-        filename = f"{safe_title}_cover.jpg"
-        filepath = os.path.join(download_path, filename)
-        
-        try:
-            print(f"正在从 {source} 下载封面: {title}")
-            response = self.session.get(cover_url, timeout=30)
-            response.raise_for_status()
-            
-            with open(filepath, 'wb') as f:
-                f.write(response.content)
-            
-            print(f"封面已下载: {filepath}")
-            return True
-            
-        except Exception as e:
-            print(f"下载封面时出错: {e}")
-            return False
-    
-    def save_info_to_file(self, anime_info, download_path="."):
-        """保存动漫信息到文本文件"""
-        if not anime_info:
-            return False
-        
-        title = anime_info['title']
-        safe_title = self._get_safe_filename(title)
-        filename = f"{safe_title}_info.txt"
-        filepath = os.path.join(download_path, filename)
-        
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(f"=== {title} 详细信息 ===\n")
-                f.write(f"数据来源: {anime_info.get('source', '未知')}\n")
-                f.write(f"ID: {anime_info.get('id', '未知')}\n\n")
-                
-                # 基本信息
-                f.write("【基本信息】\n")
-                if 'name_cn' in anime_info and anime_info['name_cn']:
-                    f.write(f"中文名: {anime_info['name_cn']}\n")
-                f.write(f"标题: {title}\n")
-                
-                # 时间信息
-                if 'air_date' in anime_info:
-                    f.write(f"开播时间: {anime_info['air_date']}\n")
-                
-                # 集数信息
-                if 'episodes' in anime_info:
-                    f.write(f"集数: {anime_info['episodes']}\n")
-                
-                # 类型
-                if 'type' in anime_info:
-                    f.write(f"类型: {anime_info['type']}\n")
-                
-                # 评分信息
-                if 'rating' in anime_info:
-                    f.write(f"评分: {anime_info['rating']}\n")
-                
-                # 简介
-                if 'summary' in anime_info and anime_info['summary']:
-                    f.write(f"\n【简介】\n{anime_info['summary']}\n")
-                
-                f.write(f"\n信息获取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            
-            print(f"信息已保存: {filepath}")
-            return True
-            
-        except Exception as e:
-            print(f"保存信息文件时出错: {e}")
-            return False
     
     def search_anime(self, anime_name, max_results=5):
         """搜索动漫信息（仅使用Bangumi源）"""
