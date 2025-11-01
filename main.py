@@ -212,22 +212,59 @@ class AnimeInfoDownloaderGUI:
         # 初始化下载器
         self.downloader = AnimeInfoDownloader()
         
-        # 创建界面
-        self.create_widgets()
-        
         # 存储搜索结果
         self.search_results = []
         
+        # 当前显示的页面
+        self.current_page = None
+        
+        # 创建界面
+        self.create_widgets()
+        
+        # 默认显示主页
+        self.show_home()
+    
     def create_widgets(self):
         # 创建菜单栏
         self.create_menu()
         
-        # 主框架
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # 主容器 - 用于切换不同页面
+        self.main_container = ttk.Frame(self.root, padding="10")
+        self.main_container.pack(fill=tk.BOTH, expand=True)
+    
+    def create_menu(self):
+        """创建菜单栏"""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        # 主页菜单
+        home_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="主页", menu=home_menu)
+        home_menu.add_command(label="搜索动漫", command=self.show_home)
+        
+        # 追番中菜单
+        watching_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="追番中", menu=watching_menu)
+        watching_menu.add_command(label="查看追番列表", command=self.show_watching_list)
+        
+        # 看完了菜单
+        finished_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="看完了", menu=finished_menu)
+        finished_menu.add_command(label="查看已完成列表", command=self.show_finished_list)
+    
+    def clear_current_page(self):
+        """清除当前页面"""
+        if self.current_page:
+            for widget in self.main_container.winfo_children():
+                widget.destroy()
+    
+    def show_home(self):
+        """显示主页（搜索界面）"""
+        self.clear_current_page()
+        self.current_page = "home"
         
         # 搜索区域
-        search_frame = ttk.LabelFrame(main_frame, text="搜索动漫", padding="10")
+        search_frame = ttk.LabelFrame(self.main_container, text="搜索动漫", padding="10")
         search_frame.pack(fill=tk.X, pady=(0, 10))
         
         ttk.Label(search_frame, text="动漫名称:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
@@ -242,7 +279,7 @@ class AnimeInfoDownloaderGUI:
         self.progress.grid(row=0, column=3, sticky=tk.W+tk.E)
         
         # 搜索结果区域
-        results_frame = ttk.LabelFrame(main_frame, text="搜索结果", padding="10")
+        results_frame = ttk.LabelFrame(self.main_container, text="搜索结果", padding="10")
         results_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
         # 创建滚动框架
@@ -268,55 +305,30 @@ class AnimeInfoDownloaderGUI:
         # 状态栏
         self.status_var = tk.StringVar()
         self.status_var.set("就绪")
-        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
+        status_bar = ttk.Label(self.main_container, textvariable=self.status_var, relief=tk.SUNKEN)
         status_bar.pack(fill=tk.X)
-    
-    def create_menu(self):
-        """创建菜单栏"""
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
-        
-        # 主页菜单
-        home_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="主页", menu=home_menu)
-        home_menu.add_command(label="搜索动漫", command=self.show_home)
-        
-        # 追番中菜单
-        watching_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="追番中", menu=watching_menu)
-        watching_menu.add_command(label="查看追番列表", command=self.show_watching_list)
-        
-        # 看完了菜单
-        finished_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="看完了", menu=finished_menu)
-        finished_menu.add_command(label="查看已完成列表", command=self.show_finished_list)
-    
-    def show_home(self):
-        """显示主页（搜索界面）"""
-        pass
     
     def show_watching_list(self):
         """显示追番列表"""
+        self.clear_current_page()
+        self.current_page = "watching"
         self._show_category_list("追番中", "watching")
     
     def show_finished_list(self):
         """显示已完成列表"""
+        self.clear_current_page()
+        self.current_page = "finished"
         self._show_category_list("看完了", "finished")
     
     def _show_category_list(self, category_name, state):
         """显示分类列表"""
-        # 创建新窗口
-        list_window = tk.Toplevel(self.root)
-        list_window.title(f"{category_name}列表")
-        list_window.geometry("800x600")
-        
         # 标题
-        title_label = ttk.Label(list_window, text=f"{category_name}列表", font=("Arial", 16, "bold"))
+        title_label = ttk.Label(self.main_container, text=f"{category_name}列表", font=("Arial", 16, "bold"))
         title_label.pack(pady=10)
         
         # 创建滚动区域
-        canvas = tk.Canvas(list_window)
-        scrollbar = ttk.Scrollbar(list_window, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(self.main_container)
+        scrollbar = ttk.Scrollbar(self.main_container, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
         
         scrollable_frame.bind(
@@ -444,7 +456,7 @@ class AnimeInfoDownloaderGUI:
             messagebox.showerror("错误", "找不到动漫的详细信息")
             return
         
-        # 创建详细信息窗口
+        # 创建详细信息窗口 - 这里仍然使用新窗口，因为详细信息内容较多
         detail_window = tk.Toplevel(self.root)
         detail_window.title(f"{anime['ajp_name']} - 详细信息")
         detail_window.geometry("700x800")
@@ -733,7 +745,7 @@ class AnimeInfoDownloaderGUI:
             self.root.after(0, lambda: self._show_anime_details_window(selected_anime))
     
     def _show_anime_details_window(self, anime_info):
-        # 创建新窗口
+        # 创建新窗口 - 详细信息仍然使用新窗口
         detail_window = tk.Toplevel(self.root)
         detail_window.title(f"{anime_info['title']} - 详细信息")
         detail_window.geometry("700x800")
