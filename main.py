@@ -11,6 +11,60 @@ from PIL import Image, ImageTk
 import io
 import pymysql
 from pymysql.cursors import DictCursor
+import time
+from collections import OrderedDict
+import webbrowser
+from urllib.parse import quote
+
+class ImageCache:
+    """图片缓存管理类"""
+    def __init__(self, max_size=100):
+        self.cache = OrderedDict()
+        self.max_size = max_size
+        self.lock = threading.Lock()
+    
+    def get(self, url):
+        """从缓存获取图片"""
+        with self.lock:
+            if url in self.cache:
+                # 将最近使用的项移到末尾
+                self.cache.move_to_end(url)
+                return self.cache[url]
+            return None
+    
+    def set(self, url, image):
+        """将图片添加到缓存"""
+        with self.lock:
+            if url in self.cache:
+                # 如果已存在，移到末尾
+                self.cache.move_to_end(url)
+            else:
+                # 如果缓存已满，移除最旧的项
+                if len(self.cache) >= self.max_size:
+                    self.cache.popitem(last=False)
+                self.cache[url] = image
+    
+    def preload(self, urls):
+        """预加载图片列表"""
+        for url in urls:
+            if url and url not in self.cache:
+                threading.Thread(target=self._download_image, args=(url,), daemon=True).start()
+    
+    def _download_image(self, url):
+        """下载图片并缓存"""
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            
+            # 转换图片
+            image_data = response.content
+            image = Image.open(io.BytesIO(image_data))
+            
+            # 添加到缓存
+            self.set(url, image)
+            print(f"预加载图片: {url}")
+        except Exception as e:
+            print(f"预加载图片失败 {url}: {e}")
 
 class DatabaseManager:
     def __init__(self):
@@ -21,12 +75,13 @@ class DatabaseManager:
         """连接数据库"""
         try:
             self.connection = pymysql.connect(
-                host='192.168.31.28',
+                host='cn-hk-bgp-4.ofalias.net',
                 user='root',
                 password='root',
                 database='animes_db',
                 charset='utf8mb4',
-                cursorclass=DictCursor
+                cursorclass=DictCursor,
+                port=39960
             )
             print("数据库连接成功")
         except Exception as e:
@@ -202,8 +257,11 @@ class AnimeInfoDownloaderGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("动漫信息下载器 - 数据库版")
-        self.root.geometry("900x700")
+        self.root.geometry("1280x720")
         self.root.configure(bg="#f0f0f0")
+        
+        # 初始化图片缓存
+        self.image_cache = ImageCache(max_size=50)
         
         # 初始化数据库管理器
         self.db = DatabaseManager()
@@ -233,7 +291,7 @@ class AnimeInfoDownloaderGUI:
         self.create_menu()
         
         # 主容器 - 用于切换不同页面
-        self.main_container = ttk.Frame(self.root, padding="10")
+        self.main_container = ttk.Frame(self.root, padding="28")
         self.main_container.pack(fill=tk.BOTH, expand=True)
     
     def create_menu(self):
@@ -283,6 +341,33 @@ class AnimeInfoDownloaderGUI:
         self.progress = ttk.Progressbar(search_frame, mode='indeterminate')
         self.progress.grid(row=0, column=3, sticky=tk.W+tk.E)
         
+        # 推荐番剧区域 - 使用网格布局
+        self.recommend_frame = ttk.LabelFrame(self.main_container, text="最新番剧推荐", padding="10")
+        self.recommend_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # 创建推荐番剧的滚动框架
+        recommend_canvas = tk.Canvas(self.recommend_frame, bg="white")
+        recommend_scrollbar = ttk.Scrollbar(self.recommend_frame, orient="vertical", command=recommend_canvas.yview)
+        self.recommend_scrollable_frame = ttk.Frame(recommend_canvas)
+        
+        self.recommend_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: recommend_canvas.configure(scrollregion=recommend_canvas.bbox("all"))
+        )
+        
+        recommend_canvas.create_window((0, 0), window=self.recommend_scrollable_frame, anchor="nw")
+        recommend_canvas.configure(yscrollcommand=recommend_scrollbar.set)
+        
+        recommend_canvas.pack(side="left", fill="both", expand=True)
+        recommend_scrollbar.pack(side="right", fill="y")
+        
+        # 绑定鼠标滚轮事件
+        recommend_canvas.bind("<MouseWheel>", lambda e: recommend_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self.recommend_scrollable_frame.bind("<MouseWheel>", lambda e: recommend_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        
+        # 加载推荐番剧
+        self.load_recommendations()
+        
         # 搜索结果区域
         results_frame = ttk.LabelFrame(self.main_container, text="搜索结果", padding="10")
         results_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -318,6 +403,12 @@ class AnimeInfoDownloaderGUI:
         self.clear_current_page()
         self.current_page = "watching"
         self.page_history.append("watching")
+        
+        # 预加载追番列表的图片
+        animes = self.db.get_animes_by_state(1, "watching")
+        cover_urls = [anime.get('cover_url') for anime in animes if anime.get('cover_url')]
+        self.image_cache.preload(cover_urls)
+        
         self._show_category_list("追番中", "watching")
     
     def show_finished_list(self):
@@ -325,6 +416,12 @@ class AnimeInfoDownloaderGUI:
         self.clear_current_page()
         self.current_page = "finished"
         self.page_history.append("finished")
+        
+        # 预加载已完成列表的图片
+        animes = self.db.get_animes_by_state(1, "finished")
+        cover_urls = [anime.get('cover_url') for anime in animes if anime.get('cover_url')]
+        self.image_cache.preload(cover_urls)
+        
         self._show_category_list("看完了", "finished")
     
     def show_anime_detail(self, anime_info, from_page="home"):
@@ -333,6 +430,10 @@ class AnimeInfoDownloaderGUI:
         self.current_page = "detail"
         self.page_history.append("detail")
         self.current_anime_detail = anime_info
+        
+        # 预加载详情页的大图
+        if anime_info.get('cover_url'):
+            self.image_cache.preload([anime_info['cover_url']])
         
         # 顶部导航栏
         nav_frame = ttk.Frame(self.main_container)
@@ -369,6 +470,17 @@ class AnimeInfoDownloaderGUI:
         # 显示详细信息
         self._populate_detail_frame(scrollable_frame, anime_info, from_page)
     
+    def _show_recommend_detail(self, anime):
+        """显示推荐番剧的详情"""
+        # 确保 anime 字典包含所有必要的字段
+        if 'name_cn' not in anime:
+            anime['name_cn'] = anime.get('name_cn', '')
+        if 'type' not in anime:
+            anime['type'] = anime.get('type', '')
+        
+        # 调用显示详情的方法，from_page 设为 "recommend" 以显示追番按钮
+        self.show_anime_detail(anime, "recommend")
+
     def show_category_anime_detail(self, aid):
         """显示分类中动漫的详细信息"""
         # 从数据库获取动漫详情
@@ -396,19 +508,17 @@ class AnimeInfoDownloaderGUI:
     def go_back(self):
         """返回上一页"""
         if len(self.page_history) > 1:
+            now_page = self.page_history[-1]
             self.page_history.pop()  # 移除当前页面
             previous_page = self.page_history[-1]
             
-            if previous_page == "home":
-                self.show_home()
-            elif previous_page == "watching":
+            if now_page == "detail" and previous_page == "watching":
                 self.show_watching_list()
-            elif previous_page == "finished":
+            elif now_page == "detail" and previous_page == "finished":
                 self.show_finished_list()
-            elif previous_page == "detail":
-                # 如果前一个也是详情页，继续返回
-                self.go_back()
-    
+            else:
+                self.show_home()
+
     def _show_category_list(self, category_name, state):
         """显示分类列表"""
         # 顶部导航栏
@@ -416,9 +526,9 @@ class AnimeInfoDownloaderGUI:
         nav_frame.pack(fill=tk.X, pady=(0, 10))
         
         # 返回按钮（如果不是从主页进入）
-        # if len(self.page_history) > 1:
-        #     back_button = ttk.Button(nav_frame, text="← 返回", command=self.go_back)
-        #     back_button.pack(side=tk.LEFT)
+        if len(self.page_history) > 1:
+            back_button = ttk.Button(nav_frame, text="← 返回", command=self.go_back)
+            back_button.pack(side=tk.LEFT)
         
         # 标题
         title_label = ttk.Label(nav_frame, text=f"{category_name}列表", font=("Arial", 16, "bold"))
@@ -519,22 +629,39 @@ class AnimeInfoDownloaderGUI:
         if cover_url:
             # 在新线程中加载图片
             threading.Thread(target=self._fetch_category_cover_image, 
-                           args=(parent_frame, placeholder, cover_url), daemon=True).start()
+                           args=(parent_frame, placeholder, cover_url, (100, 140)), daemon=True).start()
     
-    def _fetch_category_cover_image(self, parent_frame, placeholder, cover_url):
+    def _fetch_category_cover_image(self, parent_frame, placeholder, cover_url, size):
         """获取分类列表中的封面图片"""
         try:
-            # 从网络URL加载图片
-            response = requests.get(cover_url, timeout=10)
-            response.raise_for_status()
+            # 首先检查缓存
+            cached_image = self.image_cache.get(cover_url)
             
-            image_data = response.content
-            image = Image.open(io.BytesIO(image_data))
-            image.thumbnail((100, 140))  # 调整大小
-            photo = ImageTk.PhotoImage(image)
-            
-            # 在主线程中更新UI
-            self.root.after(0, self._update_category_cover_image, parent_frame, placeholder, photo)
+            if cached_image:
+                # 使用缓存的图片
+                image = cached_image.copy()
+                image.thumbnail(size)
+                photo = ImageTk.PhotoImage(image)
+                
+                # 在主线程中更新UI
+                self.root.after(0, self._update_category_cover_image, parent_frame, placeholder, photo)
+            else:
+                # 从网络URL加载图片
+                response = requests.get(cover_url, timeout=10)
+                response.raise_for_status()
+                
+                image_data = response.content
+                image = Image.open(io.BytesIO(image_data))
+                
+                # 添加到缓存
+                self.image_cache.set(cover_url, image)
+                
+                # 调整大小并显示
+                image.thumbnail(size)
+                photo = ImageTk.PhotoImage(image)
+                
+                # 在主线程中更新UI
+                self.root.after(0, self._update_category_cover_image, parent_frame, placeholder, photo)
         except Exception:
             # 如果加载失败，显示错误图标
             self.root.after(0, lambda: placeholder.config(text="加载失败", bg="red"))
@@ -557,7 +684,7 @@ class AnimeInfoDownloaderGUI:
         left_frame.pack(side=tk.LEFT, padx=(0, 20))
         
         # 加载大封面图片
-        self._load_large_cover_image(left_frame, anime_info)
+        self._load_large_cover_image(left_frame, anime_info, (200, 280))
         
         # 右侧 - 标题和基本信息
         right_frame = ttk.Frame(top_frame)
@@ -604,13 +731,48 @@ class AnimeInfoDownloaderGUI:
             summary_frame = ttk.LabelFrame(parent, text="简介", padding="10")
             summary_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
             
-            summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD, height=15)
+            summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD, height=8)
             summary_text.insert(tk.END, anime_info['summary'])
             summary_text.config(state=tk.DISABLED)
             summary_text.pack(fill=tk.BOTH, expand=True)
         
-        # 操作按钮（只有在搜索结果的详情中显示）
-        if from_page == "home":
+        # 视频搜索按钮区域
+        video_frame = ttk.LabelFrame(parent, text="在线视频", padding="10")
+        video_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # 视频搜索按钮
+        video_button_frame = ttk.Frame(video_frame)
+        video_button_frame.pack(fill=tk.X, pady=5)
+        
+        # 添加B站搜索按钮
+        bilibili_button = ttk.Button(video_button_frame, text="在B站搜索视频", 
+                                    command=lambda: self.search_on_bilibili(anime_info))
+        bilibili_button.pack(side=tk.LEFT, padx=(0, 10))
+        # 添加咕咕番搜索按钮
+        gugufan_button = ttk.Button(video_button_frame, text="在咕咕番搜索", 
+                                command=lambda: self.search_on_gugufan(anime_info))
+        gugufan_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # 添加AGE动漫搜索按钮
+        agedm_button = ttk.Button(video_button_frame, text="在AGE动漫搜索", 
+                                command=lambda: self.search_on_agedm(anime_info))
+        agedm_button.pack(side=tk.LEFT)
+
+        # # 操作按钮（只有在搜索结果的详情中显示）
+        # if from_page == "home":
+        #     button_frame = ttk.Frame(parent)
+        #     button_frame.pack(fill=tk.X, padx=10, pady=10)
+            
+        #     # 追番按钮
+        #     watching_button = ttk.Button(button_frame, text="追番", 
+        #                                 command=lambda: self._add_to_watching_by_info(anime_info))
+        #     watching_button.pack(side=tk.LEFT, padx=(0, 10))
+            
+        #     # 看完了按钮
+        #     finished_button = ttk.Button(button_frame, text="看完了", 
+        #                                 command=lambda: self._add_to_finished_by_info(anime_info))
+        #     finished_button.pack(side=tk.LEFT)
+        if from_page == "home" or from_page == "recommend":
             button_frame = ttk.Frame(parent)
             button_frame.pack(fill=tk.X, padx=10, pady=10)
             
@@ -624,28 +786,48 @@ class AnimeInfoDownloaderGUI:
                                         command=lambda: self._add_to_finished_by_info(anime_info))
             finished_button.pack(side=tk.LEFT)
     
-    def _load_large_cover_image(self, parent_frame, anime_info):
+    def _load_large_cover_image(self, parent_frame, anime_info, size):
         # 默认显示占位图
         placeholder = tk.Label(parent_frame, text="加载中...", width=20, height=28, bg="lightgray")
         placeholder.pack()
         
         # 在新线程中加载大图
-        threading.Thread(target=self._fetch_large_cover_image, args=(parent_frame, placeholder, anime_info), daemon=True).start()
+        threading.Thread(target=self._fetch_large_cover_image, 
+                        args=(parent_frame, placeholder, anime_info, size), daemon=True).start()
     
-    def _fetch_large_cover_image(self, parent_frame, placeholder, anime_info):
+    def _fetch_large_cover_image(self, parent_frame, placeholder, anime_info, size):
         try:
             if 'cover_url' in anime_info and anime_info['cover_url']:
-                response = requests.get(anime_info['cover_url'], timeout=10)
-                response.raise_for_status()
+                cover_url = anime_info['cover_url']
                 
-                # 转换图片
-                image_data = response.content
-                image = Image.open(io.BytesIO(image_data))
-                image.thumbnail((200, 280))  # 调整大小为更大的尺寸
-                photo = ImageTk.PhotoImage(image)
+                # 首先检查缓存
+                cached_image = self.image_cache.get(cover_url)
                 
-                # 在主线程中更新UI
-                self.root.after(0, self._update_large_cover_image, parent_frame, placeholder, photo)
+                if cached_image:
+                    # 使用缓存的图片
+                    image = cached_image.copy()
+                    image.thumbnail(size)
+                    photo = ImageTk.PhotoImage(image)
+                    
+                    # 在主线程中更新UI
+                    self.root.after(0, self._update_large_cover_image, parent_frame, placeholder, photo)
+                else:
+                    # 从网络URL加载图片
+                    response = requests.get(cover_url, timeout=10)
+                    response.raise_for_status()
+                    
+                    image_data = response.content
+                    image = Image.open(io.BytesIO(image_data))
+                    
+                    # 添加到缓存
+                    self.image_cache.set(cover_url, image)
+                    
+                    # 调整大小
+                    image.thumbnail(size)
+                    photo = ImageTk.PhotoImage(image)
+                    
+                    # 在主线程中更新UI
+                    self.root.after(0, self._update_large_cover_image, parent_frame, placeholder, photo)
         except Exception:
             # 如果加载失败，显示错误图标
             self.root.after(0, lambda: placeholder.config(text="加载失败", bg="red"))
@@ -656,27 +838,69 @@ class AnimeInfoDownloaderGUI:
         image_label.image = photo  # 保持引用
         image_label.pack()
     
+    def search_on_bilibili(self, anime_info):
+        """在B站搜索动漫视频"""
+        # 优先使用中文名，如果没有则使用日文名
+        search_keyword = anime_info.get('name_cn') or anime_info['title']
+        
+        # URL编码搜索关键词
+        encoded_keyword = quote(search_keyword)
+        
+        # 构建B站搜索URL
+        bilibili_url = f"https://search.bilibili.com/all?keyword={encoded_keyword}"
+        
+        # 在浏览器中打开
+        webbrowser.open(bilibili_url)
+        
+        # 可选：显示提示信息
+        # self.status_var.set(f"正在在B站搜索: {search_keyword}")
+
+    def search_on_gugufan(self, anime_info):
+        """在咕咕番搜索动漫视频"""
+        # 优先使用中文名，如果没有则使用日文名
+        search_keyword = anime_info.get('name_cn') or anime_info['title']
+        
+        # URL编码搜索关键词
+        encoded_keyword = quote(search_keyword)
+        
+        # 构建咕咕番搜索URL
+        gugufan_url = f"https://www.gugufan.cc/index.php/vod/search.html?wd={encoded_keyword}"
+        
+        # 在浏览器中打开
+        webbrowser.open(gugufan_url)
+        
+        # 可选：显示提示信息
+        self.status_var.set(f"正在在咕咕番搜索: {search_keyword}")
+
+    def search_on_agedm(self, anime_info):
+        """在AGE动漫搜索动漫视频"""
+        # 优先使用中文名，如果没有则使用日文名
+        search_keyword = anime_info.get('name_cn') or anime_info['title']
+        
+        # URL编码搜索关键词
+        encoded_keyword = quote(search_keyword)
+        
+        # 构建AGE动漫搜索URL
+        agedm_url = f"https://www.agedm.io/search?query={encoded_keyword}"
+        
+        # 在浏览器中打开
+        webbrowser.open(agedm_url)
+        
+        # 可选：显示提示信息
+        self.status_var.set(f"正在在AGE动漫搜索: {search_keyword}")
+
     def _on_mousewheel(self, event):
         """处理鼠标滚轮事件"""
         self.results_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
     
-    def search_anime(self):
-        anime_name = self.search_entry.get().strip()
-        if not anime_name:
-            messagebox.showwarning("输入错误", "请输入动漫名称")
-            return
-        
-        # 禁用搜索按钮并启动进度条
-        self.search_button.config(state="disabled")
-        self.progress.start()
-        self.status_var.set(f"正在搜索: {anime_name}")
-        
-        # 在新线程中执行搜索
-        threading.Thread(target=self._perform_search, args=(anime_name,), daemon=True).start()
     
     def _perform_search(self, anime_name):
         try:
             self.search_results = self.downloader.search_anime(anime_name, max_results=10)
+            
+            # 预加载搜索结果的图片
+            cover_urls = [anime.get('cover_url') for anime in self.search_results if anime.get('cover_url')]
+            self.image_cache.preload(cover_urls)
             
             # 在主线程中更新UI
             self.root.after(0, self._update_search_results)
@@ -719,7 +943,7 @@ class AnimeInfoDownloaderGUI:
         left_frame.pack(side=tk.LEFT, padx=5, pady=5)
         
         # 加载封面图片
-        self._load_cover_image(left_frame, anime_info)
+        self._load_cover_image(left_frame, anime_info, (100, 140))
         
         # 右半部分 - 信息
         right_frame = ttk.Frame(result_frame)
@@ -780,28 +1004,48 @@ class AnimeInfoDownloaderGUI:
                                     command=lambda idx=index: self._add_to_finished(idx))
         finished_button.pack(side=tk.LEFT)
     
-    def _load_cover_image(self, parent_frame, anime_info):
+    def _load_cover_image(self, parent_frame, anime_info, size):
         # 默认显示占位图
         placeholder = tk.Label(parent_frame, text="加载中...", width=15, height=20, bg="lightgray")
         placeholder.pack()
         
         # 在新线程中加载图片
-        threading.Thread(target=self._fetch_cover_image, args=(parent_frame, placeholder, anime_info), daemon=True).start()
+        threading.Thread(target=self._fetch_cover_image, 
+                        args=(parent_frame, placeholder, anime_info, size), daemon=True).start()
     
-    def _fetch_cover_image(self, parent_frame, placeholder, anime_info):
+    def _fetch_cover_image(self, parent_frame, placeholder, anime_info, size):
         try:
             if 'cover_url' in anime_info and anime_info['cover_url']:
-                response = requests.get(anime_info['cover_url'], timeout=10)
-                response.raise_for_status()
+                cover_url = anime_info['cover_url']
                 
-                # 转换图片
-                image_data = response.content
-                image = Image.open(io.BytesIO(image_data))
-                image.thumbnail((100, 140))  # 调整大小
-                photo = ImageTk.PhotoImage(image)
+                # 首先检查缓存
+                cached_image = self.image_cache.get(cover_url)
                 
-                # 在主线程中更新UI
-                self.root.after(0, self._update_cover_image, parent_frame, placeholder, photo)
+                if cached_image:
+                    # 使用缓存的图片
+                    image = cached_image.copy()
+                    image.thumbnail(size)
+                    photo = ImageTk.PhotoImage(image)
+                    
+                    # 在主线程中更新UI
+                    self.root.after(0, self._update_cover_image, parent_frame, placeholder, photo)
+                else:
+                    # 从网络URL加载图片
+                    response = requests.get(cover_url, timeout=10)
+                    response.raise_for_status()
+                    
+                    # 转换图片
+                    image_data = response.content
+                    image = Image.open(io.BytesIO(image_data))
+                    
+                    # 添加到缓存
+                    self.image_cache.set(cover_url, image)
+                    
+                    image.thumbnail(size)
+                    photo = ImageTk.PhotoImage(image)
+                    
+                    # 在主线程中更新UI
+                    self.root.after(0, self._update_cover_image, parent_frame, placeholder, photo)
         except Exception:
             # 如果加载失败，显示错误图标
             self.root.after(0, lambda: placeholder.config(text="加载失败", bg="red"))
@@ -858,6 +1102,358 @@ class AnimeInfoDownloaderGUI:
         except Exception as e:
             self.root.after(0, lambda: self._show_error(f"添加失败: {str(e)}"))
     
+    def _on_recommend_mousewheel(self, event):
+        """处理推荐区域的鼠标滚轮事件（水平滚动）"""
+        self.recommend_canvas.xview_scroll(int(-1*(event.delta/120)), "units")
+
+    def load_recommendations(self):
+        """加载推荐番剧"""
+        # 显示加载状态
+        for widget in self.recommend_scrollable_frame.winfo_children():
+            widget.destroy()
+        
+        loading_label = ttk.Label(self.recommend_scrollable_frame, text="正在加载最新番剧...")
+        loading_label.pack(pady=20)
+        
+        # 在新线程中加载推荐番剧
+        threading.Thread(target=self._perform_load_recommendations, 
+                        args=(loading_label,), daemon=True).start()
+
+    def _perform_load_recommendations(self, loading_label):
+        """执行加载推荐番剧"""
+        try:
+            # 使用Bangumi API获取当前季节的番剧
+            current_season = self._get_current_season()
+            season_animes = self.downloader.get_season_animes(current_season['year'], current_season['season'])
+            
+            # 限制为20个
+            season_animes = season_animes[:20]
+            
+            # 预加载图片
+            cover_urls = [anime.get('cover_url') for anime in season_animes if anime.get('cover_url')]
+            self.image_cache.preload(cover_urls)
+            
+            # 在主线程中更新UI
+            self.root.after(0, self._update_recommendations, season_animes, loading_label)
+            
+        except Exception as e:
+            self.root.after(0, lambda: self._show_recommend_error(str(e), loading_label))
+
+    def _update_recommendations(self, animes, loading_label):
+        """更新推荐番剧显示"""
+        # 移除加载提示
+        loading_label.destroy()
+        
+        if not animes:
+            ttk.Label(self.recommend_scrollable_frame, text="无法加载最新番剧", 
+                    foreground="red").pack(pady=20)
+            return
+        
+        # 使用网格布局显示推荐番剧
+        row = 0
+        col = 0
+        max_cols = 4  # 每行最多显示4个
+        
+        for i, anime in enumerate(animes):
+            # 创建项目框架
+            item_frame = ttk.Frame(self.recommend_scrollable_frame, relief="solid", borderwidth=1)
+            item_frame.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
+            
+            # 配置网格权重，使项目均匀分布
+            self.recommend_scrollable_frame.grid_columnconfigure(col, weight=1)
+            self.recommend_scrollable_frame.grid_rowconfigure(row, weight=1)
+            
+            # 封面图片
+            cover_frame = ttk.Frame(item_frame)
+            cover_frame.pack(padx=5, pady=5)
+            
+            # 加载封面图片
+            self._load_recommend_cover_image(cover_frame, anime)
+            
+            # 标题
+            title_text = anime['title']
+            if 'name_cn' in anime and anime['name_cn'] and anime['name_cn'] != anime['title']:
+                title_text = anime['name_cn']
+            
+            # 限制标题长度
+            if len(title_text) > 15:
+                title_text = title_text[:15] + "..."
+            
+            title_label = ttk.Label(item_frame, text=title_text, font=("Arial", 9, "bold"), wraplength=120)
+            title_label.pack(pady=(0, 2))
+            
+            # 详细信息框架
+            info_frame = ttk.Frame(item_frame)
+            info_frame.pack(fill=tk.X, padx=5, pady=2)
+            
+            # 集数
+            if 'episodes' in anime:
+                episodes_label = ttk.Label(info_frame, text=f"集数: {anime['episodes']}", font=("Arial", 8))
+                episodes_label.pack(anchor=tk.W)
+            
+            # 评分
+            if 'rating' in anime and anime['rating']:
+                rating_label = ttk.Label(info_frame, text=f"评分: {anime['rating']}", font=("Arial", 8))
+                rating_label.pack(anchor=tk.W)
+            
+            # 来源
+            if 'source' in anime:
+                source_label = ttk.Label(info_frame, text=f"来源: {anime['source']}", font=("Arial", 8))
+                source_label.pack(anchor=tk.W)
+            
+            # 开播时间
+            if 'air_date' in anime and anime['air_date']:
+                # 只显示年份和月份
+                try:
+                    date_obj = datetime.strptime(anime['air_date'], '%Y-%m-%d')
+                    date_str = date_obj.strftime('%Y-%m')
+                except:
+                    date_str = anime['air_date']
+                
+                date_label = ttk.Label(info_frame, text=f"开播: {date_str}", font=("Arial", 8))
+                date_label.pack(anchor=tk.W)
+            
+            # 点击事件 - 查看详情
+            item_frame.bind("<Button-1>", lambda e, a=anime: self._show_recommend_detail(a))
+            title_label.bind("<Button-1>", lambda e, a=anime: self._show_recommend_detail(a))
+            
+            # 更新网格位置
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
+
+    # def _create_recommend_item(self, anime):
+    #     """创建推荐番剧项目"""
+    #     # 创建项目框架
+    #     item_frame = ttk.Frame(self.recommend_scrollable_frame, relief="solid", borderwidth=1)
+    #     item_frame.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y)
+        
+    #     # 封面图片
+    #     cover_frame = ttk.Frame(item_frame)
+    #     cover_frame.pack(padx=5, pady=5)
+        
+    #     # 加载封面图片
+    #     self._load_recommend_cover_image(cover_frame, anime)
+        
+    #     # 标题
+    #     title_text = anime['title']
+    #     if 'name_cn' in anime and anime['name_cn'] and anime['name_cn'] != anime['title']:
+    #         title_text = anime['name_cn']
+        
+    #     # 限制标题长度
+    #     if len(title_text) > 10:
+    #         title_text = title_text[:10] + "..."
+        
+    #     title_label = ttk.Label(item_frame, text=title_text, font=("Arial", 9), wraplength=80)
+    #     title_label.pack(pady=(0, 5))
+        
+    #     # 评分
+    #     if 'rating' in anime and anime['rating']:
+    #         rating_label = ttk.Label(item_frame, text=f"⭐ {anime['rating']}", font=("Arial", 8))
+    #         rating_label.pack()
+        
+    #     # 点击事件 - 查看详情
+    #     item_frame.bind("<Button-1>", lambda e, a=anime: self._show_recommend_detail(a))
+    #     title_label.bind("<Button-1>", lambda e, a=anime: self._show_recommend_detail(a))
+
+    # def _show_recommend_detail(self, anime):
+    #     """显示推荐番剧的详情"""
+    #     self.show_anime_detail(anime, "home")
+
+    def _show_recommend_error(self, error_msg, loading_label):
+        """显示推荐番剧加载错误"""
+        loading_label.destroy()
+        ttk.Label(self.recommend_scrollable_frame, text=f"加载失败: {error_msg}", 
+                foreground="red").pack(pady=20)
+
+    def _get_current_season(self):
+        """获取当前季节"""
+        now = datetime.now()
+        year = now.year
+        month = now.month
+        
+        if month in [1, 2, 3]:
+            season = "winter"  # 冬季
+        elif month in [4, 5, 6]:
+            season = "spring"  # 春季
+        elif month in [7, 8, 9]:
+            season = "summer"  # 夏季
+        else:
+            season = "autumn"  # 秋季
+        
+        return {"year": year, "season": season}    
+
+    def _create_recommend_item(self, anime):
+        """创建推荐番剧项目"""
+        # 创建项目框架
+        item_frame = ttk.Frame(self.recommend_scrollable_frame, relief="solid", borderwidth=1)
+        item_frame.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
+        
+        # 配置网格权重，使项目均匀分布
+        self.recommend_scrollable_frame.grid_columnconfigure(col, weight=1)
+        self.recommend_scrollable_frame.grid_rowconfigure(row, weight=1)
+        
+        # 封面图片
+        cover_frame = ttk.Frame(item_frame)
+        cover_frame.pack(padx=5, pady=5)
+        
+        # 加载封面图片
+        self._load_recommend_cover_image(cover_frame, anime)
+        
+        # 标题
+        title_text = anime['title']
+        if 'name_cn' in anime and anime['name_cn'] and anime['name_cn'] != anime['title']:
+            title_text = anime['name_cn']
+        
+        # 限制标题长度
+        if len(title_text) > 15:
+            title_text = title_text[:15] + "..."
+        
+        title_label = ttk.Label(item_frame, text=title_text, font=("Arial", 9, "bold"), wraplength=120)
+        title_label.pack(pady=(0, 2))
+        
+        # 详细信息框架
+        info_frame = ttk.Frame(item_frame)
+        info_frame.pack(fill=tk.X, padx=5, pady=2)
+        
+        # 集数
+        if 'episodes' in anime:
+            episodes_label = ttk.Label(info_frame, text=f"集数: {anime['episodes']}", font=("Arial", 8))
+            episodes_label.pack(anchor=tk.W)
+        
+        # 评分
+        if 'rating' in anime and anime['rating']:
+            rating_label = ttk.Label(info_frame, text=f"评分: {anime['rating']}", font=("Arial", 8))
+            rating_label.pack(anchor=tk.W)
+        
+        # 来源
+        if 'source' in anime:
+            source_label = ttk.Label(info_frame, text=f"来源: {anime['source']}", font=("Arial", 8))
+            source_label.pack(anchor=tk.W)
+        
+        # 开播时间
+        if 'air_date' in anime and anime['air_date']:
+            # 只显示年份和月份
+            try:
+                date_obj = datetime.strptime(anime['air_date'], '%Y-%m-%d')
+                date_str = date_obj.strftime('%Y-%m')
+            except:
+                date_str = anime['air_date']
+            
+            date_label = ttk.Label(info_frame, text=f"开播: {date_str}", font=("Arial", 8))
+            date_label.pack(anchor=tk.W)
+        
+        # 点击事件 - 查看详情
+        item_frame.bind("<Button-1>", lambda e, a=anime: self._show_recommend_detail(a))
+        title_label.bind("<Button-1>", lambda e, a=anime: self._show_recommend_detail(a))
+        cover_frame.bind("<Button-1>", lambda e, a=anime: self._show_recommend_detail(a))
+        info_frame.bind("<Button-1>", lambda e, a=anime: self._show_recommend_detail(a))
+        
+        # 添加悬停效果
+        self._add_hover_effect(item_frame)
+        max_cols = 8
+        # 更新网格位置
+        col += 1
+        if col >= max_cols:
+            col = 0
+            row += 1
+
+    def _add_hover_effect(self, widget):
+        """添加鼠标悬停效果"""
+        def on_enter(e):
+            widget.configure(relief="raised", background="#e0e0e0")
+        
+        def on_leave(e):
+            widget.configure(relief="solid", background="SystemButtonFace")
+        
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+
+    def _show_recommend_detail(self, anime):
+        """显示推荐番剧的详情"""
+        # 确保 anime 字典包含所有必要的字段
+        if 'name_cn' not in anime:
+            anime['name_cn'] = anime.get('name_cn', '')
+        if 'type' not in anime:
+            anime['type'] = anime.get('type', '')
+        
+        # 调用显示详情的方法，from_page 设为 "home" 以显示追番按钮
+        self.show_anime_detail(anime, "home")
+
+    def _load_recommend_cover_image(self, parent_frame, anime):
+        """加载推荐番剧的封面图片"""
+        # 默认显示占位图
+        placeholder = tk.Label(parent_frame, text="加载中...", width=12, height=16, bg="lightgray")
+        placeholder.pack()
+        
+        # 在新线程中加载图片
+        threading.Thread(target=self._fetch_recommend_cover_image, 
+                        args=(parent_frame, placeholder, anime), daemon=True).start()
+
+    def _fetch_recommend_cover_image(self, parent_frame, placeholder, anime):
+        """获取推荐番剧的封面图片"""
+        try:
+            if 'cover_url' in anime and anime['cover_url']:
+                cover_url = anime['cover_url']
+                
+                # 首先检查缓存
+                cached_image = self.image_cache.get(cover_url)
+                
+                if cached_image:
+                    # 使用缓存的图片
+                    image = cached_image.copy()
+                    image.thumbnail((100, 140))  # 中等尺寸
+                    photo = ImageTk.PhotoImage(image)
+                    
+                    # 在主线程中更新UI
+                    self.root.after(0, self._update_recommend_cover_image, parent_frame, placeholder, photo)
+                else:
+                    # 从网络URL加载图片
+                    response = requests.get(cover_url, timeout=10)
+                    response.raise_for_status()
+                    
+                    image_data = response.content
+                    image = Image.open(io.BytesIO(image_data))
+                    
+                    # 添加到缓存
+                    self.image_cache.set(cover_url, image)
+                    
+                    # 调整大小
+                    image.thumbnail((100, 140))  # 中等尺寸
+                    photo = ImageTk.PhotoImage(image)
+                    
+                    # 在主线程中更新UI
+                    self.root.after(0, self._update_recommend_cover_image, parent_frame, placeholder, photo)
+        except Exception:
+            # 如果加载失败，显示错误图标
+            self.root.after(0, lambda: placeholder.config(text="加载失败", bg="red"))
+
+    def _update_recommend_cover_image(self, parent_frame, placeholder, photo):
+        """更新推荐番剧的封面图片"""
+        placeholder.destroy()
+        image_label = tk.Label(parent_frame, image=photo)
+        image_label.image = photo  # 保持引用
+        image_label.pack()
+
+    def search_anime(self):
+        anime_name = self.search_entry.get().strip()
+        if not anime_name:
+            messagebox.showwarning("输入错误", "请输入动漫名称")
+            return
+        
+        # 隐藏推荐区域
+        self.recommend_frame.pack_forget()
+        
+        # 禁用搜索按钮并启动进度条
+        self.search_button.config(state="disabled")
+        self.progress.start()
+        self.status_var.set(f"正在搜索: {anime_name}")
+        
+        # 在新线程中执行搜索
+        threading.Thread(target=self._perform_search, args=(anime_name,), daemon=True).start()
+
+    
     def run(self):
         self.root.mainloop()
 
@@ -868,6 +1464,64 @@ class AnimeInfoDownloader:
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
+
+    def get_season_animes(self, year, season):
+        """获取指定季节的番剧列表"""
+        try:
+            # Bangumi季节动画API
+            url = f"https://api.bgm.tv/calendar"
+            
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            animes = []
+            season_map = {
+                "winter": [1, 2, 3],
+                "spring": [4, 5, 6], 
+                "summer": [7, 8, 9],
+                "autumn": [10, 11, 12]
+            }
+            
+            # 从日历数据中提取当前季节的番剧
+            current_month = datetime.now().month
+            target_months = season_map.get(season, [])
+            
+            if current_month in target_months:
+                # 如果是当前季节，使用日历API
+                for day_data in data:
+                    for item in day_data.get('items', []):
+                        if item.get('type') == 2:  # 只取动画类型
+                            anime_info = {
+                                'title': item.get('name', ''),
+                                'name_cn': item.get('name_cn', ''),
+                                'air_date': item.get('air_date', ''),
+                                'episodes': str(item.get('eps', '')) if item.get('eps') else '集数未知',
+                                'rating': str(item.get('rating', {}).get('score', '无评分')),
+                                'summary': item.get('summary', ''),
+                                'cover_url': item.get('images', {}).get('large', ''),
+                                'source': 'Bangumi',
+                                'id': item.get('id', '')
+                            }
+                            animes.append(anime_info)
+                
+                # 限制数量并去重
+                seen_titles = set()
+                unique_animes = []
+                for anime in animes:
+                    if anime['title'] not in seen_titles:
+                        seen_titles.add(anime['title'])
+                        unique_animes.append(anime)
+                
+                return unique_animes[:20]
+            else:
+                # 如果不是当前季节，使用搜索API获取热门番剧
+                return self.search_anime("", 20)
+                
+        except Exception as e:
+            print(f"获取季节番剧失败: {e}")
+            # 失败时返回空列表
+            return []
     
     def search_bangumi(self, anime_name, max_results=5):
         """使用Bangumi（番组计划）API搜索动漫详细信息"""
