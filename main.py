@@ -215,8 +215,12 @@ class AnimeInfoDownloaderGUI:
         # 存储搜索结果
         self.search_results = []
         
-        # 当前显示的页面
+        # 当前显示的页面和页面历史
         self.current_page = None
+        self.page_history = []
+        
+        # 存储当前显示的动漫详情
+        self.current_anime_detail = None
         
         # 创建界面
         self.create_widgets()
@@ -262,6 +266,7 @@ class AnimeInfoDownloaderGUI:
         """显示主页（搜索界面）"""
         self.clear_current_page()
         self.current_page = "home"
+        self.page_history = ["home"]  # 重置历史
         
         # 搜索区域
         search_frame = ttk.LabelFrame(self.main_container, text="搜索动漫", padding="10")
@@ -312,19 +317,112 @@ class AnimeInfoDownloaderGUI:
         """显示追番列表"""
         self.clear_current_page()
         self.current_page = "watching"
+        self.page_history.append("watching")
         self._show_category_list("追番中", "watching")
     
     def show_finished_list(self):
         """显示已完成列表"""
         self.clear_current_page()
         self.current_page = "finished"
+        self.page_history.append("finished")
         self._show_category_list("看完了", "finished")
+    
+    def show_anime_detail(self, anime_info, from_page="home"):
+        """显示动漫详情"""
+        self.clear_current_page()
+        self.current_page = "detail"
+        self.page_history.append("detail")
+        self.current_anime_detail = anime_info
+        
+        # 顶部导航栏
+        nav_frame = ttk.Frame(self.main_container)
+        nav_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # 返回按钮
+        back_button = ttk.Button(nav_frame, text="← 返回", command=self.go_back)
+        back_button.pack(side=tk.LEFT)
+        
+        # 标题
+        title_label = ttk.Label(nav_frame, text="动漫详情", font=("Arial", 16, "bold"))
+        title_label.pack(side=tk.LEFT, padx=10)
+        
+        # 创建滚动区域
+        canvas = tk.Canvas(self.main_container)
+        scrollbar = ttk.Scrollbar(self.main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # 绑定鼠标滚轮事件
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        scrollable_frame.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        
+        # 显示详细信息
+        self._populate_detail_frame(scrollable_frame, anime_info, from_page)
+    
+    def show_category_anime_detail(self, aid):
+        """显示分类中动漫的详细信息"""
+        # 从数据库获取动漫详情
+        anime = self.db.get_anime_by_id(aid)
+        if not anime:
+            messagebox.showerror("错误", "找不到动漫的详细信息")
+            return
+        
+        # 转换为统一的格式
+        anime_info = {
+            'title': anime['ajp_name'],
+            'name_cn': anime['acn_name'],
+            'air_date': anime['abroadcast_time'].strftime('%Y-%m-%d') if anime['abroadcast_time'] else '',
+            'episodes': str(anime['episodes']) if anime['episodes'] else '集数未知',
+            'type': anime.get('source', ''),
+            'rating': str(anime['score']) if anime['score'] else '无评分',
+            'summary': anime['introduce'],
+            'cover_url': anime['cover_url'],
+            'source': anime['source'],
+            'id': anime['aid']
+        }
+        
+        self.show_anime_detail(anime_info, self.current_page)
+    
+    def go_back(self):
+        """返回上一页"""
+        if len(self.page_history) > 1:
+            self.page_history.pop()  # 移除当前页面
+            previous_page = self.page_history[-1]
+            
+            if previous_page == "home":
+                self.show_home()
+            elif previous_page == "watching":
+                self.show_watching_list()
+            elif previous_page == "finished":
+                self.show_finished_list()
+            elif previous_page == "detail":
+                # 如果前一个也是详情页，继续返回
+                self.go_back()
     
     def _show_category_list(self, category_name, state):
         """显示分类列表"""
+        # 顶部导航栏
+        nav_frame = ttk.Frame(self.main_container)
+        nav_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # 返回按钮（如果不是从主页进入）
+        # if len(self.page_history) > 1:
+        #     back_button = ttk.Button(nav_frame, text="← 返回", command=self.go_back)
+        #     back_button.pack(side=tk.LEFT)
+        
         # 标题
-        title_label = ttk.Label(self.main_container, text=f"{category_name}列表", font=("Arial", 16, "bold"))
-        title_label.pack(pady=10)
+        title_label = ttk.Label(nav_frame, text=f"{category_name}列表", font=("Arial", 16, "bold"))
+        title_label.pack(side=tk.LEFT, padx=10)
         
         # 创建滚动区域
         canvas = tk.Canvas(self.main_container)
@@ -408,7 +506,7 @@ class AnimeInfoDownloaderGUI:
         
         # 查看详情按钮
         detail_button = ttk.Button(right_frame, text="查看详情", 
-                                  command=lambda aid=anime['aid']: self._show_category_detail(aid))
+                                  command=lambda aid=anime['aid']: self.show_category_anime_detail(aid))
         detail_button.pack(anchor=tk.E, pady=5)
     
     def _load_category_cover_image(self, parent_frame, cover_url):
@@ -448,44 +546,8 @@ class AnimeInfoDownloaderGUI:
         image_label.image = photo  # 保持引用
         image_label.pack()
     
-    def _show_category_detail(self, aid):
-        """显示分类中动漫的详细信息"""
-        # 从数据库获取动漫详情
-        anime = self.db.get_anime_by_id(aid)
-        if not anime:
-            messagebox.showerror("错误", "找不到动漫的详细信息")
-            return
-        
-        # 创建详细信息窗口 - 这里仍然使用新窗口，因为详细信息内容较多
-        detail_window = tk.Toplevel(self.root)
-        detail_window.title(f"{anime['ajp_name']} - 详细信息")
-        detail_window.geometry("700x800")
-        
-        # 创建滚动区域
-        canvas = tk.Canvas(detail_window)
-        scrollbar = ttk.Scrollbar(detail_window, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # 绑定鼠标滚轮事件
-        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-        scrollable_frame.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-        
-        # 显示详细信息
-        self._populate_category_detail_frame(scrollable_frame, anime)
-    
-    def _populate_category_detail_frame(self, parent, anime):
-        """填充分类详情框架"""
+    def _populate_detail_frame(self, parent, anime_info, from_page):
+        """填充详情框架"""
         # 顶部框架 - 标题和封面
         top_frame = ttk.Frame(parent)
         top_frame.pack(fill=tk.X, padx=10, pady=10)
@@ -495,16 +557,16 @@ class AnimeInfoDownloaderGUI:
         left_frame.pack(side=tk.LEFT, padx=(0, 20))
         
         # 加载大封面图片
-        self._load_category_large_cover_image(left_frame, anime.get('cover_url', ''))
+        self._load_large_cover_image(left_frame, anime_info)
         
         # 右侧 - 标题和基本信息
         right_frame = ttk.Frame(top_frame)
         right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # 标题 - 中文和英文
-        title_text = anime['ajp_name']
-        if anime['acn_name'] and anime['acn_name'] != anime['ajp_name']:
-            title_text = f"{anime['acn_name']}\n({anime['ajp_name']})"
+        title_text = anime_info['title']
+        if 'name_cn' in anime_info and anime_info['name_cn'] and anime_info['name_cn'] != anime_info['title']:
+            title_text = f"{anime_info['name_cn']}\n({anime_info['title']})"
         
         title_label = ttk.Label(right_frame, text=title_text, font=("Arial", 16, "bold"))
         title_label.pack(anchor=tk.W, pady=(0, 10))
@@ -513,68 +575,82 @@ class AnimeInfoDownloaderGUI:
         info_frame = ttk.LabelFrame(right_frame, text="基本信息", padding="10")
         info_frame.pack(fill=tk.X, pady=5)
         
+        # 数据来源
+        source_label = ttk.Label(info_frame, text=f"数据来源: {anime_info.get('source', '未知')}")
+        source_label.pack(anchor=tk.W)
+        
         # 开播时间
-        if anime['abroadcast_time']:
-            date_label = ttk.Label(info_frame, text=f"开播时间: {anime['abroadcast_time'].strftime('%Y-%m-%d')}")
+        if 'air_date' in anime_info and anime_info['air_date']:
+            date_label = ttk.Label(info_frame, text=f"开播时间: {anime_info['air_date']}")
             date_label.pack(anchor=tk.W)
         
         # 集数
-        if anime['episodes']:
-            episodes_label = ttk.Label(info_frame, text=f"集数: {anime['episodes']}")
+        if 'episodes' in anime_info:
+            episodes_label = ttk.Label(info_frame, text=f"集数: {anime_info['episodes']}")
             episodes_label.pack(anchor=tk.W)
         
-        # 来源
-        if anime['source']:
-            source_label = ttk.Label(info_frame, text=f"数据来源: {anime['source']}")
-            source_label.pack(anchor=tk.W)
+        # 类型
+        if 'type' in anime_info and anime_info['type']:
+            type_label = ttk.Label(info_frame, text=f"类型: {anime_info['type']}")
+            type_label.pack(anchor=tk.W)
         
         # 评分
-        if anime['score']:
-            rating_label = ttk.Label(info_frame, text=f"评分: {anime['score']}")
+        if 'rating' in anime_info:
+            rating_label = ttk.Label(info_frame, text=f"评分: {anime_info['rating']}")
             rating_label.pack(anchor=tk.W)
         
         # 简介
-        if anime['introduce']:
+        if 'summary' in anime_info and anime_info['summary']:
             summary_frame = ttk.LabelFrame(parent, text="简介", padding="10")
             summary_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
             
             summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD, height=15)
-            summary_text.insert(tk.END, anime['introduce'])
+            summary_text.insert(tk.END, anime_info['summary'])
             summary_text.config(state=tk.DISABLED)
             summary_text.pack(fill=tk.BOTH, expand=True)
+        
+        # 操作按钮（只有在搜索结果的详情中显示）
+        if from_page == "home":
+            button_frame = ttk.Frame(parent)
+            button_frame.pack(fill=tk.X, padx=10, pady=10)
+            
+            # 追番按钮
+            watching_button = ttk.Button(button_frame, text="追番", 
+                                        command=lambda: self._add_to_watching_by_info(anime_info))
+            watching_button.pack(side=tk.LEFT, padx=(0, 10))
+            
+            # 看完了按钮
+            finished_button = ttk.Button(button_frame, text="看完了", 
+                                        command=lambda: self._add_to_finished_by_info(anime_info))
+            finished_button.pack(side=tk.LEFT)
     
-    def _load_category_large_cover_image(self, parent_frame, cover_url):
-        """加载分类详情中的大封面图片"""
+    def _load_large_cover_image(self, parent_frame, anime_info):
         # 默认显示占位图
-        placeholder = tk.Label(parent_frame, text="无封面", width=20, height=28, bg="lightgray")
+        placeholder = tk.Label(parent_frame, text="加载中...", width=20, height=28, bg="lightgray")
         placeholder.pack()
         
-        # 如果封面URL存在，加载图片
-        if cover_url:
-            # 在新线程中加载图片
-            threading.Thread(target=self._fetch_category_large_cover_image, 
-                           args=(parent_frame, placeholder, cover_url), daemon=True).start()
+        # 在新线程中加载大图
+        threading.Thread(target=self._fetch_large_cover_image, args=(parent_frame, placeholder, anime_info), daemon=True).start()
     
-    def _fetch_category_large_cover_image(self, parent_frame, placeholder, cover_url):
-        """获取分类详情中的大封面图片"""
+    def _fetch_large_cover_image(self, parent_frame, placeholder, anime_info):
         try:
-            # 从网络URL加载图片
-            response = requests.get(cover_url, timeout=10)
-            response.raise_for_status()
-            
-            image_data = response.content
-            image = Image.open(io.BytesIO(image_data))
-            image.thumbnail((200, 280))  # 调整大小为更大的尺寸
-            photo = ImageTk.PhotoImage(image)
-            
-            # 在主线程中更新UI
-            self.root.after(0, self._update_category_large_cover_image, parent_frame, placeholder, photo)
+            if 'cover_url' in anime_info and anime_info['cover_url']:
+                response = requests.get(anime_info['cover_url'], timeout=10)
+                response.raise_for_status()
+                
+                # 转换图片
+                image_data = response.content
+                image = Image.open(io.BytesIO(image_data))
+                image.thumbnail((200, 280))  # 调整大小为更大的尺寸
+                photo = ImageTk.PhotoImage(image)
+                
+                # 在主线程中更新UI
+                self.root.after(0, self._update_large_cover_image, parent_frame, placeholder, photo)
         except Exception:
             # 如果加载失败，显示错误图标
             self.root.after(0, lambda: placeholder.config(text="加载失败", bg="red"))
     
-    def _update_category_large_cover_image(self, parent_frame, placeholder, photo):
-        """更新分类详情中的大封面图片"""
+    def _update_large_cover_image(self, parent_frame, placeholder, photo):
         placeholder.destroy()
         image_label = tk.Label(parent_frame, image=photo)
         image_label.image = photo  # 保持引用
@@ -740,52 +816,7 @@ class AnimeInfoDownloaderGUI:
         """显示动漫详情"""
         if 0 <= index < len(self.search_results):
             selected_anime = self.search_results[index]
-            
-            # 在主线程中显示详细信息
-            self.root.after(0, lambda: self._show_anime_details_window(selected_anime))
-    
-    def _show_anime_details_window(self, anime_info):
-        # 创建新窗口 - 详细信息仍然使用新窗口
-        detail_window = tk.Toplevel(self.root)
-        detail_window.title(f"{anime_info['title']} - 详细信息")
-        detail_window.geometry("700x800")
-        
-        # 创建滚动区域
-        canvas = tk.Canvas(detail_window)
-        scrollbar = ttk.Scrollbar(detail_window, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # 绑定鼠标滚轮事件
-        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-        scrollable_frame.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-        
-        # 显示详细信息
-        self._populate_detail_frame(scrollable_frame, anime_info)
-        
-        # 添加操作按钮
-        button_frame = ttk.Frame(scrollable_frame)
-        button_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        # 追番按钮
-        watching_button = ttk.Button(button_frame, text="追番", 
-                                    command=lambda: self._add_to_watching_by_info(anime_info))
-        watching_button.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # 看完了按钮
-        finished_button = ttk.Button(button_frame, text="看完了", 
-                                    command=lambda: self._add_to_finished_by_info(anime_info))
-        finished_button.pack(side=tk.LEFT)
+            self.show_anime_detail(selected_anime, "home")
     
     def _add_to_watching(self, index):
         """添加到追番列表"""
@@ -826,101 +857,6 @@ class AnimeInfoDownloaderGUI:
             messagebox.showinfo("成功", f"已成功添加到{category_name}列表")
         except Exception as e:
             self.root.after(0, lambda: self._show_error(f"添加失败: {str(e)}"))
-    
-    def _populate_detail_frame(self, parent, anime_info):
-        """填充详情框架"""
-        # 顶部框架 - 标题和封面
-        top_frame = ttk.Frame(parent)
-        top_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        # 左侧 - 封面图片
-        left_frame = ttk.Frame(top_frame)
-        left_frame.pack(side=tk.LEFT, padx=(0, 20))
-        
-        # 加载大封面图片
-        self._load_large_cover_image(left_frame, anime_info)
-        
-        # 右侧 - 标题和基本信息
-        right_frame = ttk.Frame(top_frame)
-        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # 标题 - 中文和英文
-        title_text = anime_info['title']
-        if 'name_cn' in anime_info and anime_info['name_cn'] and anime_info['name_cn'] != anime_info['title']:
-            title_text = f"{anime_info['name_cn']}\n({anime_info['title']})"
-        
-        title_label = ttk.Label(right_frame, text=title_text, font=("Arial", 16, "bold"))
-        title_label.pack(anchor=tk.W, pady=(0, 10))
-        
-        # 基本信息框架
-        info_frame = ttk.LabelFrame(right_frame, text="基本信息", padding="10")
-        info_frame.pack(fill=tk.X, pady=5)
-        
-        # 数据来源
-        source_label = ttk.Label(info_frame, text=f"数据来源: {anime_info.get('source', '未知')}")
-        source_label.pack(anchor=tk.W)
-        
-        # 开播时间
-        if 'air_date' in anime_info:
-            date_label = ttk.Label(info_frame, text=f"开播时间: {anime_info['air_date']}")
-            date_label.pack(anchor=tk.W)
-        
-        # 集数
-        if 'episodes' in anime_info:
-            episodes_label = ttk.Label(info_frame, text=f"集数: {anime_info['episodes']}")
-            episodes_label.pack(anchor=tk.W)
-        
-        # 类型
-        if 'type' in anime_info:
-            type_label = ttk.Label(info_frame, text=f"类型: {anime_info['type']}")
-            type_label.pack(anchor=tk.W)
-        
-        # 评分
-        if 'rating' in anime_info:
-            rating_label = ttk.Label(info_frame, text=f"评分: {anime_info['rating']}")
-            rating_label.pack(anchor=tk.W)
-        
-        # 简介
-        if 'summary' in anime_info and anime_info['summary']:
-            summary_frame = ttk.LabelFrame(parent, text="简介", padding="10")
-            summary_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-            
-            summary_text = scrolledtext.ScrolledText(summary_frame, wrap=tk.WORD, height=15)
-            summary_text.insert(tk.END, anime_info['summary'])
-            summary_text.config(state=tk.DISABLED)
-            summary_text.pack(fill=tk.BOTH, expand=True)
-    
-    def _load_large_cover_image(self, parent_frame, anime_info):
-        # 默认显示占位图
-        placeholder = tk.Label(parent_frame, text="加载中...", width=20, height=28, bg="lightgray")
-        placeholder.pack()
-        
-        # 在新线程中加载大图
-        threading.Thread(target=self._fetch_large_cover_image, args=(parent_frame, placeholder, anime_info), daemon=True).start()
-    
-    def _fetch_large_cover_image(self, parent_frame, placeholder, anime_info):
-        try:
-            if 'cover_url' in anime_info and anime_info['cover_url']:
-                response = requests.get(anime_info['cover_url'], timeout=10)
-                response.raise_for_status()
-                
-                # 转换图片
-                image_data = response.content
-                image = Image.open(io.BytesIO(image_data))
-                image.thumbnail((200, 280))  # 调整大小为更大的尺寸
-                photo = ImageTk.PhotoImage(image)
-                
-                # 在主线程中更新UI
-                self.root.after(0, self._update_large_cover_image, parent_frame, placeholder, photo)
-        except Exception:
-            # 如果加载失败，显示错误图标
-            self.root.after(0, lambda: placeholder.config(text="加载失败", bg="red"))
-    
-    def _update_large_cover_image(self, parent_frame, placeholder, photo):
-        placeholder.destroy()
-        image_label = tk.Label(parent_frame, image=photo)
-        image_label.image = photo  # 保持引用
-        image_label.pack()
     
     def run(self):
         self.root.mainloop()
