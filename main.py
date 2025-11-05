@@ -499,14 +499,14 @@ class AnimeInfoDownloaderGUI:
         # 创建滚动区域
         canvas = tk.Canvas(self.main_container)
         scrollbar = ttk.Scrollbar(self.main_container, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
+        self.category_scrollable_frame = ttk.Frame(canvas)  # 使用实例变量以便在其它方法中访问
         
-        scrollable_frame.bind(
+        self.category_scrollable_frame.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
         
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.create_window((0, 0), window=self.category_scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         
         canvas.pack(side="left", fill="both", expand=True)
@@ -514,84 +514,108 @@ class AnimeInfoDownloaderGUI:
         
         # 绑定鼠标滚轮事件
         canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-        scrollable_frame.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self.category_scrollable_frame.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
         
         # 显示分类列表
-        self._populate_category_list(scrollable_frame, state)
+        self._populate_category_list(state)
     
-    def _populate_category_list(self, parent, state):
-        """填充分类列表"""
+    def _populate_category_list(self, state):
+        """填充分类列表 - 使用流式排版（网格布局）"""
         # 从数据库获取分类列表
         animes = self.db.get_animes_by_state(1, state)  # 使用默认用户ID=1
         
         if not animes:
-            ttk.Label(parent, text="该分类中还没有动漫", foreground="gray").pack(pady=20)
+            ttk.Label(self.category_scrollable_frame, text="该分类中还没有动漫", foreground="gray").pack(pady=20)
             return
         
-        # 显示每个动漫
+        # 使用网格布局显示动漫
+        row = 0
+        col = 0
+        max_cols = 4  # 每行最多显示4个
+        
         for anime in animes:
-            self._create_category_item(parent, anime)
+            # 创建项目框架
+            item_frame = ttk.Frame(self.category_scrollable_frame, relief="solid", borderwidth=1)
+            item_frame.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
+            
+            # 配置网格权重，使项目均匀分布
+            self.category_scrollable_frame.grid_columnconfigure(col, weight=1)
+            self.category_scrollable_frame.grid_rowconfigure(row, weight=1)
+            
+            # 封面图片
+            cover_frame = ttk.Frame(item_frame)
+            cover_frame.pack(padx=5, pady=5)
+            
+            # 加载封面图片
+            self._load_category_cover_image(cover_frame, anime.get('cover_url', ''))
+            
+            # 标题
+            title_text = anime['ajp_name']
+            if anime['acn_name'] and anime['acn_name'] != anime['ajp_name']:
+                title_text = anime['acn_name']
+            
+            # 限制标题长度
+            if len(title_text) > 15:
+                title_text = title_text[:15] + "..."
+            
+            title_label = ttk.Label(item_frame, text=title_text, font=("Arial", 10, "bold"), wraplength=150)
+            title_label.pack(pady=(0, 2))
+            
+            # 详细信息框架
+            info_frame = ttk.Frame(item_frame)
+            info_frame.pack(fill=tk.X, padx=5, pady=2)
+            
+            # 年份
+            year = str(anime['abroadcast_time'].year) if anime['abroadcast_time'] else '未知年份'
+            year_label = ttk.Label(info_frame, text=f"📅 {year}", font=("Arial", 8))
+            year_label.pack(anchor=tk.W)
+            
+            # 集数
+            episodes = anime['episodes'] if anime['episodes'] else '集数未知'
+            episodes_label = ttk.Label(info_frame, text=f"🎞️ {episodes}", font=("Arial", 8))
+            episodes_label.pack(anchor=tk.W)
+            
+            # 评分
+            rating = anime['score'] if anime['score'] else '无评分'
+            rating_label = ttk.Label(info_frame, text=f"⭐ {rating}", font=("Arial", 8))
+            rating_label.pack(anchor=tk.W)
+            
+            # 查看详情按钮
+            detail_button = ttk.Button(item_frame, text="查看详情", 
+                                      command=lambda aid=anime['aid']: self.show_category_anime_detail(aid))
+            detail_button.pack(pady=5)
+            
+            # 添加悬停效果
+            self._add_hover_effect(item_frame)
+            
+            # 更新网格位置
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
     
-    def _create_category_item(self, parent, anime):
-        """创建分类列表项"""
-        # 创建项目框架
-        item_frame = ttk.Frame(parent, relief="solid", borderwidth=1)
-        item_frame.pack(fill=tk.X, padx=5, pady=5)
+    def _add_hover_effect(self, widget):
+        """添加鼠标悬停效果"""
+        def on_enter(e):
+            widget.configure(relief="raised", background="#e0e0e0")
         
-        # 左半部分 - 封面图片
-        left_frame = ttk.Frame(item_frame)
-        left_frame.pack(side=tk.LEFT, padx=5, pady=5)
+        def on_leave(e):
+            widget.configure(relief="solid", background="SystemButtonFace")
         
-        # 加载封面图片
-        self._load_category_cover_image(left_frame, anime.get('cover_url', ''))
-        
-        # 右半部分 - 信息
-        right_frame = ttk.Frame(item_frame)
-        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # 标题 - 中文和英文
-        title_text = anime['ajp_name']
-        if anime['acn_name'] and anime['acn_name'] != anime['ajp_name']:
-            title_text = f"{anime['acn_name']}\n({anime['ajp_name']})"
-        
-        title_label = ttk.Label(right_frame, text=title_text, font=("Arial", 12, "bold"))
-        title_label.pack(anchor=tk.W)
-        
-        # 基本信息框架
-        info_frame = ttk.Frame(right_frame)
-        info_frame.pack(fill=tk.X, pady=5)
-        
-        # 年份
-        year = str(anime['abroadcast_time'].year) if anime['abroadcast_time'] else '未知年份'
-        year_label = ttk.Label(info_frame, text=f"📅 {year}")
-        year_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # 集数
-        episodes = anime['episodes'] if anime['episodes'] else '集数未知'
-        episodes_label = ttk.Label(info_frame, text=f"🎞️ {episodes}")
-        episodes_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # 评分
-        rating = anime['score'] if anime['score'] else '无评分'
-        rating_label = ttk.Label(info_frame, text=f"⭐ {rating}")
-        rating_label.pack(side=tk.LEFT)
-        
-        # 查看详情按钮
-        detail_button = ttk.Button(right_frame, text="查看详情", 
-                                  command=lambda aid=anime['aid']: self.show_category_anime_detail(aid))
-        detail_button.pack(anchor=tk.E, pady=5)
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
     
     def _load_category_cover_image(self, parent_frame, cover_url):
         """加载分类列表中的封面图片"""
         # 默认显示占位图
-        placeholder = tk.Label(parent_frame, text="无封面", width=15, height=20, bg="lightgray")
+        placeholder = tk.Label(parent_frame, text="无封面", width=12, height=16, bg="lightgray")
         placeholder.pack()
         
         # 如果封面URL存在，加载图片
         if cover_url:
             # 在新线程中加载图片
             threading.Thread(target=self._fetch_category_cover_image, 
-                           args=(parent_frame, placeholder, cover_url, (100, 140)), daemon=True).start()
+                           args=(parent_frame, placeholder, cover_url, (120, 160)), daemon=True).start()
     
     def _fetch_category_cover_image(self, parent_frame, placeholder, cover_url, size):
         """获取分类列表中的封面图片"""
